@@ -1,0 +1,14 @@
+# Development database ONLY. Add running application services as each member implements them.
+# For multi-document MongoDB transactions, switch to a single-node replica-set
+# configuration; this basic standalone MongoDB is just for initial development.
+services:
+  mongodb:
+    image: mongo:8
+    container_name: unischedule-mongodb
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:27017:27017"
+    volumes:
+      - mongo_data:/data/db
+volumes:
+  mongo_data:

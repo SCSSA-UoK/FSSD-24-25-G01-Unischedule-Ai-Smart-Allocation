@@ -1,0 +1,35 @@
+{
+  "notice": "All entries fictitious. Modify to match permitted datasets after normalizing identifiers.",
+  "rooms": [
+    {
+      "roomId": "HALL_A",
+      "name": "Main Hall A",
+      "seats": 80,
+      "features": [
+        "projector",
+        "sound"
+      ],
+      "building": "Main"
+    },
+    {
+      "roomId": "ROOM_C",
+      "name": "Classroom C",
+      "seats": 50,
+      "features": [
+        "projector"
+      ],
+      "building": "Main"
+    },
+    {
+      "roomId": "LAB_A",
+      "name": "Computer Laboratory A",
+      "seats": 70,
+      "usableComputers": 65,
+      "features": [
+        "computers",
+        "projector"
+      ],
+      "building": "IT"
+    }
+  ]
+}

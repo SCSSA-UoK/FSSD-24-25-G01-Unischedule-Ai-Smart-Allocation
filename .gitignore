@@ -1,0 +1,21 @@
+.env
+.env.*
+!.env.example
+node_modules/
+.next/
+dist/
+build/
+target/
+.venv/
+__pycache__/
+*.pyc
+.idea/
+.vscode/
+.DS_Store
+*.log
+coverage/
+# The real faculty timetable, source data, identifiable names and approval docs stay local.
+data/private-faculty/*
+!data/private-faculty/.gitkeep
+# Never commit raw exports or uploaded data.
+data/uploads/

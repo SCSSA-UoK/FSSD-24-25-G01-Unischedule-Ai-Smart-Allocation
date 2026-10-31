@@ -1,0 +1,7 @@
+session_id,day,start_time,end_time,module_code,lecturer_code,student_group,registered_count,room_code,session_type
+S001,Monday,09:00,11:00,CS101,L001,G1,40,HALL_A,Lecture
+S002,Monday,09:00,11:00,CS201,L002,G2,60,LAB_A,Lab
+S003,Monday,11:00,13:00,MA101,L003,G3,48,ROOM_C,Lecture
+S004,Tuesday,09:00,11:00,EN101,L004,G4,35,HALL_A,Lecture
+S005,Tuesday,11:00,13:00,CS102,L001,G1,40,ROOM_C,Tutorial
+S006,Wednesday,09:00,11:00,CS301,L002,G5,55,LAB_A,Lab
