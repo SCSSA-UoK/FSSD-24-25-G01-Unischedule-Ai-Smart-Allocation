@@ -1,0 +1,3 @@
+# Keep provisional faculty reference data private until permission to publish is confirmed.
+*.jsonl
+dataset_manifest.json
