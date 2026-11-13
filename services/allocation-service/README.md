@@ -6,7 +6,7 @@
 
 This service recommends rooms and recovery arrangements. It searches empty rooms, explores moving existing lectures, and compares solutions. It must never update official or simulated timetable bookings. Spring Boot alone validates scheduling and applies administrator-approved simulation changes.
 
-**Available now:** this folder and documentation. There is no Node application, package manifest, working endpoint, seed script or test command here. All features, API schemas, frontend routes and application commands below are **planned** unless explicitly described as existing.
+**Available now:** documentation, a [fictional relocation fixture and its data-format notes](fixtures/README.md), and fixture consistency tests. Run those checks from this directory with `node --test src/tests/single-relocation-fixture.test.cjs`; they check the example data, not an implemented optimizer. There is no Node application, package manifest, working endpoint or seed script here. All features, API schemas, frontend routes and application commands below are **planned** unless explicitly described as existing.
 
 Read [team ownership](../../docs/01-team-ownership.md), [service interfaces](../../docs/04-service-interfaces.md), and [OpenAPI guidance](../../contracts/openapi/README.md). These preserve the original service handover references.
 
