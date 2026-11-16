@@ -1,12 +1,14 @@
 # Room Allocation & Optimization Service — Member 2
 
-**Owner:** Member 2 · **Stack:** Node.js / Express / MongoDB · **Planned port:** 4001
+**Owner:** Member 2 · **Stack:** Node.js / Express / MongoDB · **Default port:** 4001
 
 ## 1. Overview and current status
 
 This service recommends rooms and recovery arrangements. It searches empty rooms, explores moving existing lectures, and compares solutions. It must never update official or simulated timetable bookings. Spring Boot alone validates scheduling and applies administrator-approved simulation changes.
 
-**Available now:** documentation, a [fictional relocation fixture and its data-format notes](fixtures/README.md), and fixture consistency tests. Run those checks from this directory with `node --test src/tests/single-relocation-fixture.test.cjs`; they check the example data, not an implemented optimizer. There is no Node application, package manifest, working endpoint or seed script here. All features, API schemas, frontend routes and application commands below are **planned** unless explicitly described as existing.
+**Available now:** a runnable Express service, `GET /health`, root environment configuration, consistent JSON errors, HTTP/configuration tests, and a [fictional relocation fixture with consistency checks](fixtures/README.md). Run `npm.cmd test` from this directory to execute the tests. Allocation algorithms, allocation endpoints, database persistence and allocation UI pages are still **planned**.
+
+`GET /health` returns `200` with `{"status":"ok","service":"allocation-service"}`. This is a liveness check: it does not connect to or report readiness for MongoDB, Platform or Facilities. Each response has a generated `X-Request-Id`; errors include the same value as `traceId`. Unknown routes return a JSON `404`, malformed JSON returns `400`, JSON bodies over 100kb return `413`, and unsupported body encodings return `415`. Unexpected failures return a generic `500` without internal error details.
 
 Read [team ownership](../../docs/01-team-ownership.md), [service interfaces](../../docs/04-service-interfaces.md), and [OpenAPI guidance](../../contracts/openapi/README.md). These preserve the original service handover references.
 
@@ -98,28 +100,29 @@ Use the following **proposed** normalized contract consistently across all three
 
 The current Java model uses `id`, `dayOfWeek`, `startTime` and `endTime`; it has no scenario revision or dated interval yet. Agree with Member 1 on `id` → `sessionId` and expanding recurring weekdays into dates. Do not assume this contract already exists. For the CSV, map `session_id`, `registered_count`, `room_code` to the normalized fields. Preserve sample IDs `HALL_A`, `ROOM_C`, `LAB_A`.
 
-## 6. Stack and suggested folder structure
+## 6. Stack and folder structure
 
-Suggested libraries: Express for HTTP, Mongoose for MongoDB models, dotenv for root configuration, Zod for validation, Vitest and Supertest for tests. They are not installed yet.
+The service uses CommonJS, Express and dotenv. Tests use Node's built-in test runner and Supertest. Node.js 22 or later is required. Mongoose and domain-validation libraries have not been added; the service currently does not use a database or external API client.
 
 ```text
 services/allocation-service/
   README.md
-  package.json                 # to create
+  package.json
+  package-lock.json
   src/
     server.js
     app.js
     config/env.js
-    routes/
-    controllers/
-    services/                  # orchestration, ranking, preview
-    algorithms/                # direct, swaps, bounded search
-    clients/                   # platform and facilities adapters
-    models/
-    validators/
-    middleware/
+    routes/health.js
+    middleware/                # request IDs and error responses
+    tests/                     # HTTP, environment and fixture checks
+    controllers/               # placeholder
+    services/                  # placeholder: orchestration, ranking, preview
+    algorithms/                # placeholder: direct, swaps, bounded search
+    clients/                   # placeholder: platform and facilities adapters
+    models/                    # placeholder
+    validation/                # placeholder
   fixtures/
-  tests/
 ```
 
 Algorithms should accept plain data so they can be tested without a live LLM or database.
@@ -215,39 +218,33 @@ Show revision and validation time, a recommendation-only label, and loading/empt
 
 ## 11. Development setup and root environment
 
-Existing infrastructure steps, from repository root:
+From `services/allocation-service`, install the locked dependencies and start the service:
 
 ```powershell
-if (-not (Test-Path .env)) { Copy-Item .env.example .env }
-docker compose up -d mongodb
-docker compose ps
+npm.cmd ci
+npm.cmd start
 ```
 
-Compose starts only local standalone MongoDB. Atlas is an alternative via a private root `.env` URI. Never put credentials in source or fixtures.
+Use `npm.cmd run dev` for Node's watch mode and `npm.cmd test` for all tests. The `.cmd` form works in PowerShell when execution policy blocks `npm.ps1`; `npm` also works in shells that permit it. Stop the server with Ctrl+C.
 
-From this service directory, initialize the future application:
+In a second PowerShell terminal:
 
 ```powershell
-npm init -y
-npm install express mongoose dotenv zod
-npm install --save-dev nodemon vitest supertest
+Invoke-RestMethod http://localhost:4001/health
 ```
 
-Create `src/server.js` and add proposed scripts `dev: nodemon src/server.js`, `start: node src/server.js`, `test: vitest run`. Only then use `npm run dev` and `npm test`; these commands are not supplied today. Choose CommonJS or ES modules consistently.
+`src/app.js` constructs the Express app without listening or loading private configuration. `src/server.js` loads configuration and starts the listener. The HTTP service and tests run without MongoDB, Platform, Facilities or an LLM.
 
-Load the shared **root** `.env`, not a service-local file. In future CommonJS `src/config/env.js`:
+`src/config/env.js` resolves the shared **root** `.env` relative to the file, independently of the terminal's working directory. Existing shell environment values take precedence. A missing `.env` uses defaults; an unreadable file or invalid configuration stops startup. Explicit ports must be integers from 1 to 65535 and the configured timezone must be recognized by Node's timezone data.
 
-```js
-const path = require('node:path');
-require('dotenv').config({ path: path.resolve(__dirname, '../../../../.env') });
-```
+MongoDB is not required for the implemented HTTP endpoints. When persistence is added, the existing root `docker-compose.yml` provides a local standalone MongoDB through `docker compose up -d mongodb`. Never put credentials in source or fixtures.
 
 | Variable | Status / use |
 |---|---|
-| `MONGODB_URI` | Existing key; select `allocation_db` explicitly in the client |
-| `ALLOCATION_PORT=4001` | Existing key |
-| `FACILITIES_PORT=4002` | Existing key; local development |
-| `PROJECT_TIMEZONE=Asia/Colombo` | Existing key |
+| `ALLOCATION_PORT=4001` | Implemented; defaults to 4001 |
+| `PROJECT_TIMEZONE=Asia/Colombo` | Implemented; defaults to Asia/Colombo |
+| `MONGODB_URI` | Existing key; unused by the HTTP scaffold; select `allocation_db` when implementing persistence |
+| `FACILITIES_PORT=4002` | Existing key; reserved for facilities integration |
 | `PLATFORM_BASE_URL=http://localhost:8081` | Proposed new root key matching current Java configuration; confirm first |
 | `FACILITIES_BASE_URL=http://localhost:4002` | Proposed new root key |
 | `ALLOCATION_DB=allocation_db` | Optional proposed root key |
@@ -257,10 +254,14 @@ The template's `SPRING_PORT=8080` does not override the current hardcoded Java p
 
 ## 12. Dummy-data workflow and testing
 
+Run `npm.cmd test` from the service directory. The current checks cover liveness, trace IDs, JSON error handling, configuration defaults/file precedence, invalid configuration and the fictional relocation fixture. Environment tests use temporary files instead of reading private root configuration. The fixture checks verify hand-written example data; candidate generation and live integration are not implemented.
+
+The following workflow and candidate tests describe the intended algorithm implementation:
+
 1. Start with [sample timetable](../../examples/sample_timetable.csv) and [sample facilities](../../examples/sample_facilities.json). Build mapping adapters without changing shared samples to satisfy a test.
 2. Add S010/S100 from section 4 as another fictional fixture. Reuse the same IDs/intervals across services.
 3. Seed only allocation-owned records. Mock external clients with versioned snapshots so other services need not run.
-4. Test pure algorithms, then HTTP routes using Supertest. Run proposed `npm test` only after setup.
+4. Test pure algorithms, then their HTTP routes using Supertest; add those tests to the existing `npm.cmd test` suite.
 5. Replace mock adapters with real APIs as contracts become available; visibly distinguish mock and integrated results.
 
 | Test | Expected result |
