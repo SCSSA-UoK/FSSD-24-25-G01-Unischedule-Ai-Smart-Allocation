@@ -2,6 +2,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 
 type Lecturer = {
   id: string;
@@ -538,6 +539,7 @@ export default function Home() {
         >
           Room &amp; day lookup
         </button>
+        <Link href="/facilities">Facilities</Link>
       </nav>
 
       {tab === "lecturers" ? (
