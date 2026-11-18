@@ -6,13 +6,13 @@
 
 This service recommends rooms and recovery arrangements. It searches empty rooms, explores moving existing lectures, and compares solutions. It must never update official or simulated timetable bookings. Spring Boot alone validates scheduling and applies administrator-approved simulation changes.
 
-**Available now:** a runnable Express service, `GET /health`, root environment configuration, consistent JSON errors, HTTP/configuration tests, and a [fictional relocation fixture with consistency checks](fixtures/README.md). Run `npm.cmd test` from this directory to execute the tests. Allocation algorithms, allocation endpoints, database persistence and allocation UI pages are still **planned**.
+**Available now:** a runnable Express service, `GET /health`, root environment configuration, consistent JSON errors, request/snapshot validation, read-only fixture clients, sample-data normalizers, and [four fictional acceptance fixtures](fixtures/README.md). `npm.cmd run preview:input -- direct-room` prepares normalized fixture inputs; `npm.cmd test` runs the tests. Allocation algorithms, allocation endpoints, database persistence and allocation UI pages are still **planned**.
 
 `GET /health` returns `200` with `{"status":"ok","service":"allocation-service"}`. This is a liveness check: it does not connect to or report readiness for MongoDB, Platform or Facilities. Each response has a generated `X-Request-Id`; errors include the same value as `traceId`. Unknown routes return a JSON `404`, malformed JSON returns `400`, JSON bodies over 100kb return `413`, and unsupported body encodings return `415`. Unexpected failures return a generic `500` without internal error details.
 
 Read [team ownership](../../docs/01-team-ownership.md), [service interfaces](../../docs/04-service-interfaces.md), and [OpenAPI guidance](../../contracts/openapi/README.md). These preserve the original service handover references.
 
-Repository inspection found basic Spring Boot `GET` and `POST /api/timetables` code, but no scenario read/validate/apply APIs. Current Java configuration uses port **8081**; the root template proposes **8080**. Confirm the port with Member 1. Do not treat the existing create endpoint as a validated simulation API.
+Spring Boot now has basic timetable endpoints and `/api/simulations` preview/move APIs. Its preview explicitly warns that changes are not scheduling-validated. It still lacks the proposed versioned `/api/scenarios` snapshot/validate/apply contract needed by Allocation: current previews have recurring times and omit required enrollment/equipment facts. Facilities currently has a local demo UI, without a backend API. The fixture clients below do not call these services or infer missing facts. Java uses port **8081**; the root template proposes **8080**. Confirm the live contract with the owners before integration.
 
 ## 2. Responsibilities and data ownership
 
@@ -98,11 +98,13 @@ Use the following **proposed** normalized contract consistently across all three
 - `allowedMoveCount` is the maximum number of **other existing sessions** displaced, excluding the target; the returned move list still includes the target.
 - Candidate validation states: `pending`, `valid`, `invalid`, `stale`. Only an actual Spring Boot result may set `valid`; store its reference/time.
 
-The current Java model uses `id`, `dayOfWeek`, `startTime` and `endTime`; it has no scenario revision or dated interval yet. Agree with Member 1 on `id` → `sessionId` and expanding recurring weekdays into dates. Do not assume this contract already exists. For the CSV, map `session_id`, `registered_count`, `room_code` to the normalized fields. Preserve sample IDs `HALL_A`, `ROOM_C`, `LAB_A`.
+The current Java models use recurring weekday/time fields and lack the normalized revision/dates/requirements contract. Agree identity mapping with Member 1; do not guess a lecturer or join unrelated records to invent enrollment. For fictional CSV-style rows, `normalizeTimetableRow()` maps `session_id`, `registered_count` and `room_code`, requiring an explicit matching date and facilities/computer requirements. It preserves IDs and uses the project's `+05:30` offset. `normalizeFacilitiesRoom()` maps canonical sample rooms; computer-equipped rooms require an explicit working count. These functions accept parsed objects, not raw CSV files or the Facilities UI's display labels. Shared samples are unchanged.
+
+Request validation accepts bounded IDs, nonnegative safe scenario revisions, `allowedMoveCount` from 0 to 3, and optional preferences/search limits. Defaults are `minimizeChanges: true`, `maxCandidates: 10` and `timeoutMs: 2000`; maximum limits are 50 candidates and 10000ms. An optional dated search window must run forwards, span at most seven days and contain the entire affected session. Validation rejects unknown fields, missing requirements, invalid calendar dates, reversed intervals, duplicate IDs and unknown room/session references. These are input checks, not authoritative scheduling validation.
 
 ## 6. Stack and folder structure
 
-The service uses CommonJS, Express and dotenv. Tests use Node's built-in test runner and Supertest. Node.js 22 or later is required. Mongoose and domain-validation libraries have not been added; the service currently does not use a database or external API client.
+The service uses CommonJS, Express, dotenv and Zod. Tests use Node's built-in test runner, Supertest and YAML parsing for contract checks. Node.js 22 or later is required. The service does not use a database or live external API client yet.
 
 ```text
 services/allocation-service/
@@ -113,15 +115,16 @@ services/allocation-service/
     server.js
     app.js
     config/env.js
+    preview-input.js            # local fixture-input command
     routes/health.js
     middleware/                # request IDs and error responses
     tests/                     # HTTP, environment and fixture checks
     controllers/               # placeholder
-    services/                  # placeholder: orchestration, ranking, preview
+    services/                  # input preparation; search/ranking still pending
     algorithms/                # placeholder: direct, swaps, bounded search
-    clients/                   # placeholder: platform and facilities adapters
+    clients/                   # read-only fixture clients and sample normalizers
     models/                    # placeholder
-    validation/                # placeholder
+    validation/                # request, session, room and snapshot schemas
   fixtures/
 ```
 
@@ -141,7 +144,7 @@ Use public IDs separately from MongoDB `_id`. Record scoring and facilities vers
 
 ## 8. Proposed REST API and JSON examples
 
-**These endpoints do not run yet.** Publish agreed schemas later in `contracts/openapi/allocation.openapi.yaml`.
+**These allocation endpoints do not run yet.** The [OpenAPI draft](../../contracts/openapi/allocation.openapi.yaml) documents the implemented health route and marks candidate search/scoring as planned. The remaining routes below are broader design proposals. The draft awaits team review; it does not establish live compatibility or implemented authentication.
 
 | Method and path | Request → response | Success |
 |---|---|---|
@@ -227,6 +230,14 @@ npm.cmd start
 
 Use `npm.cmd run dev` for Node's watch mode and `npm.cmd test` for all tests. The `.cmd` form works in PowerShell when execution policy blocks `npm.ps1`; `npm` also works in shells that permit it. Stop the server with Ctrl+C.
 
+Prepare input without starting HTTP, MongoDB or other services:
+
+```powershell
+npm.cmd run preview:input -- direct-room
+```
+
+Available fixture names are `single-relocation`, `direct-room`, `equipment-failure` and `no-solution`. Output is explicitly `mode: "fixture"` and `validationStatus: "pending"`. It contains the request, affected session and versioned schedule/room context; it contains no generated candidates or fixture `expected` answers. Unknown fixture names fail rather than falling back to another scenario.
+
 In a second PowerShell terminal:
 
 ```powershell
@@ -254,7 +265,9 @@ The template's `SPRING_PORT=8080` does not override the current hardcoded Java p
 
 ## 12. Dummy-data workflow and testing
 
-Run `npm.cmd test` from the service directory. The current checks cover liveness, trace IDs, JSON error handling, configuration defaults/file precedence, invalid configuration and the fictional relocation fixture. Environment tests use temporary files instead of reading private root configuration. The fixture checks verify hand-written example data; candidate generation and live integration are not implemented.
+Run `npm.cmd test` from the service directory. Current checks cover HTTP/configuration, strict requests and snapshots, source-data normalization, fixture isolation, revision/reference errors, the input-preview command and OpenAPI references/examples. Environment tests use temporary files instead of reading private root configuration. Fixture checks verify hand-written example data; candidate generation and live integration are not implemented.
+
+`prepareAllocationInput(request, { platformClient, facilitiesClient })` validates the request before reading the two clients, combines their snapshots and rejects mismatched scenarios/revisions, missing sessions and invalid room references. Fixture clients implement `getScenarioSnapshot(scenarioId)` and `getRoomSnapshot()`, return fresh copies and expose no mutation methods. Dependency failures propagate; no successful candidate or validity is invented.
 
 The following workflow and candidate tests describe the intended algorithm implementation:
 

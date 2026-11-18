@@ -1,0 +1,260 @@
+openapi: 3.1.0
+info:
+  title: Allocation service contract
+  version: 0.2.0
+  description: >-
+    Draft for team review. Only GET /health is implemented. Candidate search and
+    scoring are planned; the current HTTP server returns 404 for their paths
+    when the body passes the shared JSON parser. Input preparation currently
+    runs locally with explicit fixture data, without a fixture HTTP endpoint.
+    Authentication and service credentials remain integration work.
+servers:
+  - url: http://localhost:4001
+paths:
+  /health:
+    get:
+      operationId: getAllocationHealth
+      x-implementation-status: implemented
+      description: Process liveness only; does not check MongoDB, Platform or Facilities.
+      responses:
+        '200':
+          description: The HTTP process is responding.
+          headers:
+            X-Request-Id: { $ref: '#/components/headers/RequestId' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Health' }
+              example: { status: ok, service: allocation-service }
+        '400': { $ref: '#/components/responses/ErrorResponse' }
+        '413': { $ref: '#/components/responses/ErrorResponse' }
+        '415': { $ref: '#/components/responses/ErrorResponse' }
+        '500': { $ref: '#/components/responses/ErrorResponse' }
+  /allocation/candidates:
+    post:
+      operationId: generateAllocationCandidates
+      x-implementation-status: planned
+      description: >-
+        Planned deterministic search; currently returns 404 after JSON parsing.
+        Proposes complete move sets without writing bookings. Only actual
+        Platform validation may mark a candidate valid; fixtures remain pending.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CandidateRequest' }
+            example:
+              scenarioId: scenario-relocation-001
+              scenarioRevision: 3
+              affectedSessionId: S007
+              allowedMoveCount: 1
+              preferences: { minimizeChanges: true }
+              limits: { maxCandidates: 10, timeoutMs: 2000 }
+      responses:
+        '200':
+          description: Planned search result; an empty candidate list can be a successful result.
+          headers:
+            X-Request-Id: { $ref: '#/components/headers/RequestId' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CandidateResponse' }
+        '400': { $ref: '#/components/responses/ErrorResponse' }
+        '404': { $ref: '#/components/responses/ErrorResponse' }
+        '409': { $ref: '#/components/responses/ErrorResponse' }
+        '413': { $ref: '#/components/responses/ErrorResponse' }
+        '415': { $ref: '#/components/responses/ErrorResponse' }
+        '422': { $ref: '#/components/responses/ErrorResponse' }
+        '503': { $ref: '#/components/responses/ErrorResponse' }
+  /allocation/score:
+    post:
+      operationId: scoreAllocationCandidates
+      x-implementation-status: planned
+      description: >-
+        Planned comparison of candidates from the same scenario revision;
+        currently returns 404 after JSON parsing. A cost never establishes
+        scheduling validity or authorizes applying a move.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ScoreRequest' }
+            example:
+              scenarioId: scenario-relocation-001
+              scenarioRevision: 3
+              candidateIds: [candidate-001]
+      responses:
+        '200':
+          description: Planned ranking with lower costs preferred.
+          headers:
+            X-Request-Id: { $ref: '#/components/headers/RequestId' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ScoreResponse' }
+        '400': { $ref: '#/components/responses/ErrorResponse' }
+        '404': { $ref: '#/components/responses/ErrorResponse' }
+        '409': { $ref: '#/components/responses/ErrorResponse' }
+        '413': { $ref: '#/components/responses/ErrorResponse' }
+        '415': { $ref: '#/components/responses/ErrorResponse' }
+        '422': { $ref: '#/components/responses/ErrorResponse' }
+        '503': { $ref: '#/components/responses/ErrorResponse' }
+components:
+  headers:
+    RequestId:
+      description: Generated per response; equals traceId in error bodies.
+      schema: { type: string, format: uuid }
+  responses:
+    ErrorResponse:
+      description: >-
+        Flat JSON error. 400 malformed input/JSON; 404 missing route or ID;
+        409 stale revision; 413 body over 100kb; 415 unsupported body encoding;
+        422 invalid requirements; 503 unavailable dependency; 500 unexpected
+        failure. Domain and dependency errors are planned. Current middleware
+        implements parser errors, unknown routes and generic internal errors.
+      headers:
+        X-Request-Id: { $ref: '#/components/headers/RequestId' }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+  schemas:
+    Id:
+      type: string
+      pattern: '^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$'
+      description: Stable identifier, distinct from a display room code.
+    OffsetDateTime:
+      type: string
+      format: date-time
+      pattern: '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:Z|[+-]\d{2}:\d{2})$'
+      description: Real calendar date, whole seconds and explicit UTC offset; not a recurring weekday/time.
+    Health:
+      type: object
+      additionalProperties: false
+      required: [status, service]
+      properties:
+        status: { type: string, const: ok }
+        service: { type: string, const: allocation-service }
+    CandidateRequest:
+      type: object
+      additionalProperties: false
+      required: [scenarioId, scenarioRevision, affectedSessionId, allowedMoveCount]
+      properties:
+        scenarioId: { $ref: '#/components/schemas/Id' }
+        scenarioRevision: { type: integer, minimum: 0, maximum: 9007199254740991 }
+        affectedSessionId: { $ref: '#/components/schemas/Id' }
+        allowedMoveCount:
+          type: integer
+          minimum: 0
+          maximum: 3
+          description: Other existing sessions displaced, excluding the target.
+        preferences:
+          type: object
+          additionalProperties: false
+          properties:
+            minimizeChanges: { type: boolean, default: true }
+        limits:
+          type: object
+          additionalProperties: false
+          properties:
+            maxCandidates: { type: integer, minimum: 1, maximum: 50, default: 10 }
+            timeoutMs: { type: integer, minimum: 1, maximum: 10000, default: 2000 }
+        searchWindow:
+          type: object
+          additionalProperties: false
+          required: [startAt, endAt]
+          description: Runtime checks require end after start and a duration of at most seven days.
+          properties:
+            startAt: { $ref: '#/components/schemas/OffsetDateTime' }
+            endAt: { $ref: '#/components/schemas/OffsetDateTime' }
+    ValidationStatus:
+      type: string
+      enum: [pending, valid, invalid, stale]
+      description: Only an actual Platform result permits valid; local or fixture checks do not.
+    Move:
+      type: object
+      additionalProperties: false
+      required: [sessionId, fromRoomId, toRoomId, startAt, endAt]
+      properties:
+        sessionId: { $ref: '#/components/schemas/Id' }
+        fromRoomId:
+          anyOf:
+            - { $ref: '#/components/schemas/Id' }
+            - { type: 'null' }
+        toRoomId: { $ref: '#/components/schemas/Id' }
+        startAt: { $ref: '#/components/schemas/OffsetDateTime' }
+        endAt: { $ref: '#/components/schemas/OffsetDateTime' }
+    CostBreakdown:
+      type: object
+      additionalProperties: false
+      properties:
+        displacedExistingSessions: { type: integer, minimum: 0 }
+        timeChangedSessions: { type: integer, minimum: 0 }
+        buildingChangedSessions: { type: integer, minimum: 0 }
+        totalUnusedSeats: { type: integer, minimum: 0 }
+        cost: { type: number, minimum: 0 }
+    Candidate:
+      type: object
+      additionalProperties: false
+      required: [candidateId, validationStatus, moves, reasons]
+      properties:
+        candidateId: { $ref: '#/components/schemas/Id' }
+        validationStatus: { $ref: '#/components/schemas/ValidationStatus' }
+        moves:
+          type: array
+          minItems: 1
+          maxItems: 4
+          items: { $ref: '#/components/schemas/Move' }
+        costBreakdown: { $ref: '#/components/schemas/CostBreakdown' }
+        reasons: { type: array, items: { type: string } }
+    CandidateResponse:
+      type: object
+      additionalProperties: false
+      required: [runId, scenarioId, scenarioRevision, truncated, candidates]
+      properties:
+        runId: { $ref: '#/components/schemas/Id' }
+        scenarioId: { $ref: '#/components/schemas/Id' }
+        scenarioRevision: { type: integer, minimum: 0, maximum: 9007199254740991 }
+        truncated: { type: boolean, description: True means the search did not exhaust its permitted space. }
+        candidates:
+          type: array
+          maxItems: 50
+          items: { $ref: '#/components/schemas/Candidate' }
+        reasons: { type: array, items: { type: string } }
+    ScoreRequest:
+      type: object
+      additionalProperties: false
+      required: [scenarioId, scenarioRevision, candidateIds]
+      properties:
+        scenarioId: { $ref: '#/components/schemas/Id' }
+        scenarioRevision: { type: integer, minimum: 0, maximum: 9007199254740991 }
+        candidateIds:
+          type: array
+          minItems: 1
+          maxItems: 50
+          uniqueItems: true
+          items: { $ref: '#/components/schemas/Id' }
+    ScoreResponse:
+      type: object
+      additionalProperties: false
+      required: [rankedCandidates]
+      properties:
+        rankedCandidates:
+          type: array
+          maxItems: 50
+          items:
+            type: object
+            additionalProperties: false
+            required: [candidateId, cost, validationStatus]
+            properties:
+              candidateId: { $ref: '#/components/schemas/Id' }
+              cost: { type: number, minimum: 0 }
+              validationStatus: { $ref: '#/components/schemas/ValidationStatus' }
+    Error:
+      type: object
+      additionalProperties: false
+      required: [code, message, traceId]
+      properties:
+        code: { type: string }
+        message: { type: string }
+        traceId: { type: string }
+        details:
+          oneOf:
+            - { type: object, additionalProperties: true }
+            - { type: array, items: { type: object } }

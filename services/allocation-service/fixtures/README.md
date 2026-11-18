@@ -1,4 +1,17 @@
-# Relocation acceptance fixture
+# Allocation acceptance fixtures
+
+These four datasets are fictional inputs for independent development. Each has explicit dated sessions, physical room facts, constraints and a versioned request. Its `expected` section is hand-written acceptance data; clients do not return it as a generated answer.
+
+| Fixture name | Scenario ID | Hand-written acceptance story |
+|---|---|---|
+| `single-relocation` | `scenario-relocation-001` | Move S001 to ROOM_C to free HALL_A for S007 |
+| `direct-room` | `scenario-direct-001` | HALL_A is empty and can fit S007 |
+| `equipment-failure` | `scenario-equipment-001` | S002 needs 50 computers; LAB_A has 40 working, and LAB_BACKUP has 60 |
+| `no-solution` | `scenario-no-solution-001` | ROOM_C is closed; the same relocation is unavailable within the allowed move count |
+
+From the allocation-service directory, run `npm.cmd run preview:input -- <fixture-name>`. This prepares validated input with `mode: "fixture"` and `validationStatus: "pending"`; it does not run allocation search or produce candidates. Fixture names are allowlisted, and returned data is copied so a caller cannot alter the stored example. `npm.cmd test` checks all input adapters, normalizers and schemas.
+
+## The relocation example
 
 `single-relocation.json` describes the 60-student example in the [shared workflow](../../../docs/02-end-to-end-workflow.md). All IDs and records are fictional. Room capacities and IDs follow the [shared facilities sample](../../../examples/sample_facilities.json).
 
@@ -24,6 +37,8 @@ This fixture makes the existing [proposed interface](../../../docs/04-service-in
 - `constraints` explicitly disallows time changes and has no lecturer/group unavailability in this example. `restrictions` is empty; the fixture has no closures or equipment outages.
 - `request.allowedMoveCount` limits displaced existing sessions, excluding the target. The returned move list still includes the target.
 - `expected` contains hand-written acceptance data, not output from an implemented optimizer. The proposal stays `pending`; a fixture check cannot establish authoritative validity.
+
+Restrictions in the other examples use `restrictionId`, `roomId`, `kind`, dated `startAt`/`endAt`, `unavailableFacilities`, nullable `usableComputers` and a reason. A working-computer restriction is an effective count cap, not a number to subtract. In the equipment-failure snapshot, LAB_A already has 40 usable computers after the fault; do not subtract the same outage again. LAB_BACKUP is an additional fictional room, not a change to the shared facilities sample. The no-solution example closes ROOM_C for the full interval. No algorithm has yet proved the expected outcomes.
 
 ## Reproduce the checks
 

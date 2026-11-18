@@ -1,0 +1,115 @@
+{
+  "fixtureVersion": 1,
+  "notice": "Fictional simulation data. Expected outcomes are hand-written acceptance data, not generated or platform-validated results. LAB_A already records 40 usable computers after the fault; its restriction is a cap, not another subtraction.",
+  "mode": "fixture",
+  "scenarioId": "scenario-equipment-001",
+  "scenarioRevision": 3,
+  "facilitiesVersion": "fixture-v1",
+  "timezone": "Asia/Colombo",
+  "constraints": {
+    "allowTimeChanges": false,
+    "lecturerUnavailability": [],
+    "studentGroupUnavailability": []
+  },
+  "rooms": [
+    {
+      "roomId": "HALL_A",
+      "seats": 80,
+      "features": [
+        "projector",
+        "sound"
+      ],
+      "usableComputers": 0,
+      "building": "Main"
+    },
+    {
+      "roomId": "ROOM_C",
+      "seats": 50,
+      "features": [
+        "projector"
+      ],
+      "usableComputers": 0,
+      "building": "Main"
+    },
+    {
+      "roomId": "LAB_A",
+      "seats": 70,
+      "features": [
+        "computers",
+        "projector"
+      ],
+      "usableComputers": 40,
+      "building": "IT"
+    },
+    {
+      "roomId": "LAB_BACKUP",
+      "seats": 70,
+      "features": [
+        "computers",
+        "projector"
+      ],
+      "usableComputers": 60,
+      "building": "IT"
+    }
+  ],
+  "restrictions": [
+    {
+      "restrictionId": "restriction-computers-001",
+      "roomId": "LAB_A",
+      "kind": "equipment-outage",
+      "startAt": "2026-11-16T09:00:00+05:30",
+      "endAt": "2026-11-16T11:00:00+05:30",
+      "unavailableFacilities": [],
+      "usableComputers": 40,
+      "reason": "Working computer count reduced to 40."
+    }
+  ],
+  "sessions": [
+    {
+      "sessionId": "S001",
+      "lecturerId": "L001",
+      "studentGroupId": "G1",
+      "roomId": "HALL_A",
+      "registeredStudents": 40,
+      "requiredFacilities": [
+        "projector"
+      ],
+      "requiredWorkingComputers": 0,
+      "startAt": "2026-11-16T09:00:00+05:30",
+      "endAt": "2026-11-16T11:00:00+05:30"
+    },
+    {
+      "sessionId": "S002",
+      "lecturerId": "L002",
+      "studentGroupId": "G2",
+      "roomId": "LAB_A",
+      "registeredStudents": 60,
+      "requiredFacilities": [
+        "computers",
+        "projector"
+      ],
+      "requiredWorkingComputers": 50,
+      "startAt": "2026-11-16T09:00:00+05:30",
+      "endAt": "2026-11-16T11:00:00+05:30"
+    }
+  ],
+  "request": {
+    "scenarioId": "scenario-equipment-001",
+    "scenarioRevision": 3,
+    "affectedSessionId": "S002",
+    "allowedMoveCount": 1,
+    "preferences": {
+      "minimizeChanges": true
+    },
+    "limits": {
+      "maxCandidates": 10,
+      "timeoutMs": 2000
+    }
+  },
+  "expected": {
+    "directRoomIds": [
+      "LAB_BACKUP"
+    ],
+    "outcome": "equipment-failure"
+  }
+}
