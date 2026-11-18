@@ -6,7 +6,20 @@
 
 Facilities describes campus spaces and whether their physical resources are usable. It owns rooms, laboratories, equipment, maintenance and restrictions. Spring Boot owns official and simulated bookings. A room can be physically usable while already booked; these are different checks.
 
-**Available now:** this folder and documentation. There is no Node application, package manifest, running endpoint, seed script or test runner. All features, APIs, UI routes and application commands below are **planned** unless explicitly described as existing.
+**Available now:** a minimal Express bootstrap with root `.env` loading, validated configuration, and a Mongoose connection to `FACILITIES_DB`. Startup performs a read-only MongoDB ping before listening. Room models, application endpoints, seed data and UI integration remain **planned**.
+
+### Run the database connection bootstrap
+
+Use Node.js 22 or newer. Set `MONGODB_URI` and `FACILITIES_DB=facilities_db` in the ignored repository-root `.env`. Keep credentials out of tracked files. `FACILITIES_PORT` defaults to `4002`. Existing process environment values take precedence over `.env`.
+
+From the repository root in PowerShell:
+
+```powershell
+npm --prefix .\services\facilities-service install
+npm --prefix .\services\facilities-service start
+```
+
+Use `npm --prefix .\services\facilities-service run dev` for Node watch mode. The `.env` path is resolved from the service code, so it does not depend on the working directory. A successful startup logs the database name after ping, then the HTTP port. Failures print a sanitized category and exit with code 1. No application endpoints are implemented yet.
 
 Keep the original handover references: [team ownership](../../docs/01-team-ownership.md), [service interfaces](../../docs/04-service-interfaces.md), and [OpenAPI guidance](../../contracts/openapi/README.md).
 
@@ -88,12 +101,12 @@ The current standalone local MongoDB does not support multi-document transaction
 
 ## 6. Stack and suggested folder structure
 
-Suggested dependencies: Express (HTTP), Mongoose (MongoDB models), dotenv (root configuration), Zod (validation), Vitest and Supertest (tests). None is installed here yet.
+Installed bootstrap dependencies: Express (HTTP), Mongoose (MongoDB connection), and dotenv (root configuration). Zod, Vitest and Supertest remain suggestions for later feature development.
 
 ```text
 services/facilities-service/
   README.md
-  package.json                 # to create
+  package.json
   src/
     server.js
     app.js
@@ -291,26 +304,26 @@ docker compose ps
 
 Compose starts only local standalone MongoDB. Atlas is optional via a private root `.env` URI. Never paste credentials into documentation, source, screenshots or fixtures.
 
-From this service directory, initialize the future app:
+From this service directory, install and run the CommonJS bootstrap:
 
 ```powershell
-npm init -y
-npm install express mongoose dotenv zod
-npm install --save-dev nodemon vitest supertest
+npm install
+npm run dev
 ```
 
-Create `src/server.js`; add proposed scripts `dev: nodemon src/server.js`, `start: node src/server.js`, `test: vitest run`. Only then run `npm run dev` or `npm test`; neither is supplied today. Agree on CommonJS or ES modules.
+The supplied scripts use `node --watch src/server.js` for development, `node src/server.js` for startup, and Node's built-in test runner for `npm test`.
 
-Use the shared root `.env`. For future CommonJS `src/config/env.js`:
+The shared root `.env` is loaded by `src/config/env.js` using this path:
 
 ```js
 const path = require('node:path');
-require('dotenv').config({ path: path.resolve(__dirname, '../../../../.env') });
+require('dotenv').config({ path: path.resolve(__dirname, '../../../../.env'), quiet: true });
 ```
 
 | Variable | Status / use |
 |---|---|
 | `MONGODB_URI` | Existing key; select `facilities_db` explicitly in the client |
+| `FACILITIES_DB=facilities_db` | Required database name passed to Mongoose as `dbName` |
 | `FACILITIES_PORT=4002` | Existing key |
 | `OPERATIONS_PORT=4003` | Existing key; local development |
 | `PROJECT_TIMEZONE=Asia/Colombo` | Existing key |
