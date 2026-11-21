@@ -5,7 +5,7 @@ function startServer() {
   const config = loadConfig();
   const server = createApp().listen(config.port);
   server.once('listening', () => {
-    console.log(`Allocation service listening on port ${config.port}.`);
+    console.log(`Allocation service listening on port ${config.port}. Fixture data mode.`);
   });
 
   server.on('error', (error) => {

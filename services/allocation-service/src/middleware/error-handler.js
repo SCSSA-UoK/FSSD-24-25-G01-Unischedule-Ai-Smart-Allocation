@@ -1,3 +1,5 @@
+const { AllocationInputError } = require('../validation/allocation-input');
+
 function notFound(request, response) {
   response.status(404).json({
     code: 'NOT_FOUND',
@@ -9,6 +11,13 @@ function notFound(request, response) {
 function errorHandler(error, request, response, next) {
   if (response.headersSent) {
     return next(error);
+  }
+
+  if (error instanceof AllocationInputError
+      && Number.isInteger(error.status) && error.status >= 400 && error.status <= 599) {
+    const body = { code: error.code, message: error.message, traceId: response.locals.traceId };
+    if (error.details !== undefined) body.details = error.details;
+    return response.status(error.status).json(body);
   }
 
   let status = 500;

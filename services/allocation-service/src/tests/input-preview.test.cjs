@@ -32,8 +32,13 @@ test('the preview command rejects unknown fixtures without a successful JSON res
   assert.match(result.stderr, /FIXTURE_NOT_FOUND/);
 });
 
-test('a valid fixture request does not turn the planned candidate endpoint into a successful route', async () => {
+test('a valid relocation request reaches the direct-only endpoint without returning the fixture proposal', async () => {
   const result = await request(createApp()).post('/allocation/candidates')
-    .send(loadFixture('single-relocation').request).expect(404);
-  assert.equal(result.body.code, 'NOT_FOUND');
+    .send(loadFixture('single-relocation').request).expect(200);
+  assert.equal(result.body.mode, 'fixture');
+  assert.equal(result.body.scope, 'direct-only');
+  assert.equal(result.body.validationStatus, 'pending');
+  assert.equal(result.body.truncated, false);
+  assert.deepEqual(result.body.candidates, []);
+  assert.equal(result.body.expected, undefined);
 });

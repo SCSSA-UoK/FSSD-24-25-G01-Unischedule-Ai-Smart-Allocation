@@ -13,6 +13,8 @@ From the allocation-service directory, run `npm.cmd run preview:input -- <fixtur
 
 Use `npm.cmd run preview:rooms -- <fixture-name>` for actual local room screening. The report includes sorted eligible room IDs and physical/booking rejection reasons while retaining fixture mode and pending validation. Tests compare those IDs with the hand-written direct-room expectations: HALL_A for `direct-room`, LAB_BACKUP for `equipment-failure`, and none for the other two cases. An empty list does not prove that no relocation or broader recovery exists. No moves or bookings are produced.
 
+`POST /allocation/candidates` now generates direct target-only move proposals using these facts. Use the fixture's `request` as the JSON body, as shown in the [service API guide](../README.md). Candidates are computed from the inputs, never copied from `expected`; they remain fixture/pending and cause no booking changes. The target's current room is excluded from direct destinations. The direct-room and equipment-failure cases produce one proposal each; the other cases produce a complete empty direct-search result. Relocation and scoring are not implemented.
+
 ## The relocation example
 
 `single-relocation.json` describes the 60-student example in the [shared workflow](../../../docs/02-end-to-end-workflow.md). All IDs and records are fictional. Room capacities and IDs follow the [shared facilities sample](../../../examples/sample_facilities.json).

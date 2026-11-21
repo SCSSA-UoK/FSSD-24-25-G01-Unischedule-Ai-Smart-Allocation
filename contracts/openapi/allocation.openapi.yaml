@@ -1,13 +1,12 @@
 openapi: 3.1.0
 info:
   title: Allocation service contract
-  version: 0.2.0
+  version: 0.3.0
   description: >-
-    Draft for team review. Only GET /health is implemented. Candidate search and
-    scoring are planned; the current HTTP server returns 404 for their paths
-    when the body passes the shared JSON parser. Input preparation currently
-    runs locally with explicit fixture data, without a fixture HTTP endpoint.
-    Authentication and service credentials remain integration work.
+    Draft for team review. GET /health and POST /allocation/candidates are
+    implemented. Candidate generation uses fictional snapshots and direct
+    room moves only. Scoring remains planned. Authentication, live backend
+    integration and storage are not implemented. Allocation never writes bookings.
 servers:
   - url: http://localhost:4001
 paths:
@@ -32,11 +31,16 @@ paths:
   /allocation/candidates:
     post:
       operationId: generateAllocationCandidates
-      x-implementation-status: planned
+      x-implementation-status: implemented
       description: >-
-        Planned deterministic search; currently returns 404 after JSON parsing.
-        Proposes complete move sets without writing bookings. Only actual
-        Platform validation may mark a candidate valid; fixtures remain pending.
+        Fixture-only direct room search at the affected session's original time.
+        Known default scenarios are scenario-direct-001, scenario-relocation-001,
+        scenario-equipment-001 and scenario-no-solution-001; unknown scenarios
+        return 404 without falling back to another fixture. Each pending proposal
+        moves only the target to a different eligible room. No existing session
+        is displaced. Room checks do not establish lecturer/group availability
+        or whole-plan validity. Only actual Platform validation could mark a
+        proposal valid; this endpoint always returns pending. Requires JSON.
       requestBody:
         required: true
         content:
@@ -51,7 +55,10 @@ paths:
               limits: { maxCandidates: 10, timeoutMs: 2000 }
       responses:
         '200':
-          description: Planned search result; an empty candidate list can be a successful result.
+          description: >-
+            Direct-only search result, including an empty successful search.
+            Truncated results do not establish that no alternative exists.
+            Dependency failure instead produces a 503 or 504 error.
           headers:
             X-Request-Id: { $ref: '#/components/headers/RequestId' }
           content:
@@ -64,6 +71,8 @@ paths:
         '415': { $ref: '#/components/responses/ErrorResponse' }
         '422': { $ref: '#/components/responses/ErrorResponse' }
         '503': { $ref: '#/components/responses/ErrorResponse' }
+        '504': { $ref: '#/components/responses/ErrorResponse' }
+        '500': { $ref: '#/components/responses/ErrorResponse' }
   /allocation/score:
     post:
       operationId: scoreAllocationCandidates
@@ -104,11 +113,12 @@ components:
   responses:
     ErrorResponse:
       description: >-
-        Flat JSON error. 400 malformed input/JSON; 404 missing route or ID;
-        409 stale revision; 413 body over 100kb; 415 unsupported body encoding;
-        422 invalid requirements; 503 unavailable dependency; 500 unexpected
-        failure. Domain and dependency errors are planned. Current middleware
-        implements parser errors, unknown routes and generic internal errors.
+        Flat JSON error. 400 malformed JSON; 404 missing route or ID; 409 stale
+        revision; 413 body over 100kb; 415 unsupported body encoding or non-JSON
+        candidate request (UNSUPPORTED_MEDIA_TYPE); 422 invalid input or
+        requirements; 503 failed dependency read; 504 dependency read timeout;
+        500 unexpected failure. Input preparation waits at most 5000ms by default,
+        independently of the search-loop budget. Unexpected messages stay generic.
       headers:
         X-Request-Id: { $ref: '#/components/headers/RequestId' }
       content:
@@ -143,7 +153,9 @@ components:
           type: integer
           minimum: 0
           maximum: 3
-          description: Other existing sessions displaced, excluding the target.
+          description: >-
+            Maximum other existing sessions displaced, excluding the target.
+            The current direct-only implementation displaces zero even when this is positive.
         preferences:
           type: object
           additionalProperties: false
@@ -152,6 +164,11 @@ components:
         limits:
           type: object
           additionalProperties: false
+          description: >-
+            Candidates retain room-ID order up to maxCandidates. timeoutMs is a
+            soft monotonic search-loop budget after input preparation, checked
+            between rooms; it cannot interrupt a synchronous room check or bound
+            total HTTP duration. Dependency reads have a separate timeout.
           properties:
             maxCandidates: { type: integer, minimum: 1, maximum: 50, default: 10 }
             timeoutMs: { type: integer, minimum: 1, maximum: 10000, default: 2000 }
@@ -159,7 +176,10 @@ components:
           type: object
           additionalProperties: false
           required: [startAt, endAt]
-          description: Runtime checks require end after start and a duration of at most seven days.
+          description: >-
+            Runtime checks require end after start, at most seven days and full
+            containment of the target interval. A wider window does not change
+            the target's original time in the direct-only implementation.
           properties:
             startAt: { $ref: '#/components/schemas/OffsetDateTime' }
             endAt: { $ref: '#/components/schemas/OffsetDateTime' }
@@ -182,6 +202,7 @@ components:
         endAt: { $ref: '#/components/schemas/OffsetDateTime' }
     CostBreakdown:
       type: object
+      description: Proposed future scoring components; not emitted by direct-only candidates.
       additionalProperties: false
       properties:
         displacedExistingSessions: { type: integer, minimum: 0 }
@@ -192,30 +213,84 @@ components:
     Candidate:
       type: object
       additionalProperties: false
-      required: [candidateId, validationStatus, moves, reasons]
+      description: >-
+        A direct-only proposal with one target move. Destination differs from
+        the target's current room; original start/end timestamps are preserved.
+        Candidate identity is stable for the same move and snapshot versions.
+        These cross-field conditions are enforced by candidate generation.
+      required: [candidateId, validationStatus, displacedExistingSessions, moves, reasons]
       properties:
         candidateId: { $ref: '#/components/schemas/Id' }
-        validationStatus: { $ref: '#/components/schemas/ValidationStatus' }
+        validationStatus: { type: string, const: pending }
+        displacedExistingSessions: { type: integer, const: 0 }
         moves:
           type: array
           minItems: 1
-          maxItems: 4
+          maxItems: 1
           items: { $ref: '#/components/schemas/Move' }
-        costBreakdown: { $ref: '#/components/schemas/CostBreakdown' }
         reasons: { type: array, items: { type: string } }
+    RoomCheck:
+      type: object
+      additionalProperties: false
+      required: [roomId, suitable, available, eligible, effectiveUsableComputers, missingFacilities, activeRestrictionIds, blockingSessionIds, reasons]
+      properties:
+        roomId: { $ref: '#/components/schemas/Id' }
+        suitable: { type: boolean, description: Capacity, equipment and restrictions pass local checks. }
+        available: { type: boolean, description: No other session occupies the room during the target interval. }
+        eligible: { type: boolean, description: Both suitable and available; not whole-plan validity. }
+        effectiveUsableComputers: { type: integer, minimum: 0, maximum: 100000 }
+        missingFacilities:
+          type: array
+          uniqueItems: true
+          items: { $ref: '#/components/schemas/Id' }
+        activeRestrictionIds:
+          type: array
+          uniqueItems: true
+          items: { $ref: '#/components/schemas/Id' }
+        blockingSessionIds:
+          type: array
+          uniqueItems: true
+          items: { $ref: '#/components/schemas/Id' }
+        reasons:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [code, message]
+            properties:
+              code:
+                type: string
+                enum: [CAPACITY_EXCEEDED, MISSING_FACILITY, INSUFFICIENT_COMPUTERS, ROOM_CLOSED, ROOM_OCCUPIED]
+              message: { type: string }
     CandidateResponse:
       type: object
       additionalProperties: false
-      required: [runId, scenarioId, scenarioRevision, truncated, candidates]
+      required: [runId, mode, scope, validationStatus, scenarioId, scenarioRevision, facilitiesVersion, truncated, candidates, roomChecks, reasons]
       properties:
-        runId: { $ref: '#/components/schemas/Id' }
+        runId:
+          $ref: '#/components/schemas/Id'
+          description: Unique per response; does not imply a stored or retrievable run.
+        mode: { type: string, const: fixture }
+        scope: { type: string, const: direct-only }
+        validationStatus: { type: string, const: pending }
         scenarioId: { $ref: '#/components/schemas/Id' }
         scenarioRevision: { type: integer, minimum: 0, maximum: 9007199254740991 }
-        truncated: { type: boolean, description: True means the search did not exhaust its permitted space. }
+        facilitiesVersion: { $ref: '#/components/schemas/Id' }
+        truncated:
+          type: boolean
+          description: >-
+            True when an additional eligible candidate was omitted or the search
+            budget expired before completion. Exactly maxCandidates results from
+            a complete search do not by themselves make this true.
         candidates:
           type: array
           maxItems: 50
           items: { $ref: '#/components/schemas/Candidate' }
+        roomChecks:
+          type: array
+          maxItems: 1000
+          description: ID-sorted checks for processed non-current rooms; can be partial when truncated.
+          items: { $ref: '#/components/schemas/RoomCheck' }
         reasons: { type: array, items: { type: string } }
     ScoreRequest:
       type: object

@@ -6,7 +6,7 @@
 
 This service recommends rooms and recovery arrangements. It searches empty rooms, explores moving existing lectures, and compares solutions. It must never update official or simulated timetable bookings. Spring Boot alone validates scheduling and applies administrator-approved simulation changes.
 
-**Available now:** a runnable Express service, `GET /health`, root configuration, JSON errors, validated fixture inputs, and local room checks for capacity, required facilities, working computers, restrictions and booking overlaps. [Four fictional fixtures](fixtures/README.md) support independent testing. `npm.cmd run preview:input -- direct-room` prepares inputs; `npm.cmd run preview:rooms -- equipment-failure` reports room checks and rejection reasons. Candidate generation, ranking, allocation HTTP endpoints, persistence and allocation UI pages are still **planned**.
+**Available now:** an Express service with `GET /health` and `POST /allocation/candidates`, strict input validation, read-only fixture clients, room checks and direct-room candidate generation. [Four fictional fixtures](fixtures/README.md) support independent testing. Every generated candidate is a target-only move at its original time, explicitly marked fixture/pending. Swaps, ranking, live upstream integration, authentication, persistence and allocation UI pages remain **planned**.
 
 `GET /health` returns `200` with `{"status":"ok","service":"allocation-service"}`. This is a liveness check: it does not connect to or report readiness for MongoDB, Platform or Facilities. Each response has a generated `X-Request-Id`; errors include the same value as `traceId`. Unknown routes return a JSON `404`, malformed JSON returns `400`, JSON bodies over 100kb return `413`, and unsupported body encodings return `415`. Unexpected failures return a generic `500` without internal error details.
 
@@ -132,10 +132,11 @@ services/allocation-service/
     preview-input.js            # local fixture-input command
     preview-rooms.js            # local room-check command
     routes/health.js
+    routes/candidates.js
     middleware/                # request IDs and error responses
     tests/                     # HTTP, environment and fixture checks
     controllers/               # placeholder
-    services/                  # input preparation and room inspection
+    services/                  # input preparation, room inspection and direct candidates
     algorithms/                # interval overlap and room suitability/occupancy checks
     clients/                   # read-only fixture clients and sample normalizers
     models/                    # placeholder
@@ -157,61 +158,53 @@ Use owned logical database `allocation_db` under the shared MongoDB URI.
 
 Use public IDs separately from MongoDB `_id`. Record scoring and facilities versions for reproducibility. Agree retention for large temporary snapshots. Do not create a timetable-bookings collection here.
 
-## 8. Proposed REST API and JSON examples
+## 8. REST API and JSON examples
 
-**These allocation endpoints do not run yet.** The [OpenAPI draft](../../contracts/openapi/allocation.openapi.yaml) documents the implemented health route and marks candidate search/scoring as planned. The remaining routes below are broader design proposals. The draft awaits team review; it does not establish live compatibility or implemented authentication.
+The [OpenAPI contract](../../contracts/openapi/allocation.openapi.yaml) documents the implemented fixture-only candidate endpoint and health route. Scoring and other routes remain proposals. The contract awaits team review and does not establish live upstream compatibility or implemented authentication.
 
-| Method and path | Request → response | Success |
+| Method and path | Behavior | Status |
 |---|---|---|
-| POST `/allocation/candidates` | Scenario, target, limits → run and candidates | 200 synchronous result |
-| POST `/allocation/room-swaps` | Same shape, restricted relocation/swap search | 200 |
-| POST `/allocation/score` | Revision + candidate IDs → ranked costs | 200 |
-| GET `/allocation/results/{runId}` | Read stored run and candidates | 200 |
-| GET `/allocation/analytics?from=...&to=...` | Read benchmark summaries | 200 |
+| GET `/health` | HTTP process liveness | Implemented |
+| POST `/allocation/candidates` | Direct room changes from the fixture catalog | Implemented, 200 |
+| POST `/allocation/room-swaps` | Relocation/swap search | Planned |
+| POST `/allocation/score` | Ranked costs | Planned |
+| GET `/allocation/results/{runId}` | Stored run lookup | Planned |
+| GET `/allocation/analytics?from=...&to=...` | Benchmark summaries | Planned |
 
-Agree that the root README's generic result `{id}` means `runId`.
+Send `Content-Type: application/json`. The default resolver accepts only the four fixture scenario IDs in the [fixture guide](fixtures/README.md); an unknown scenario returns 404 instead of falling back to another dataset. Clients can be injected through `createApp({ clients })` for independent tests. Neither mode calls timetable mutation or apply APIs.
 
 Example candidate request:
 
 ```json
 {
-  "scenarioId": "scenario-demo-01",
+  "scenarioId": "scenario-direct-001",
   "scenarioRevision": 3,
-  "affectedSessionId": "S100",
-  "allowedMoveCount": 1,
-  "searchWindow": {
-    "startAt": "2026-11-02T09:00:00+05:30",
-    "endAt": "2026-11-02T11:00:00+05:30"
-  },
+  "affectedSessionId": "S007",
+  "allowedMoveCount": 0,
   "preferences": {"minimizeChanges": true},
   "limits": {"maxCandidates": 10, "timeoutMs": 2000}
 }
 ```
 
-Example response before authoritative validation:
+A response includes a unique `runId`, scenario/revision, `facilitiesVersion`, `mode: "fixture"`, `scope: "direct-only"`, `validationStatus: "pending"`, candidates, processed room checks, reasons and `truncated`. The direct-room fixture produces one candidate containing this move:
 
 ```json
 {
-  "runId": "opt-001",
-  "scenarioId": "scenario-demo-01",
-  "scenarioRevision": 3,
-  "truncated": false,
-  "candidates": [{
-    "candidateId": "candidate-001",
-    "validationStatus": "pending",
-    "moves": [
-      {"sessionId":"S010","fromRoomId":"HALL_LARGE","toRoomId":"ROOM_SMALL","startAt":"2026-11-02T09:00:00+05:30","endAt":"2026-11-02T11:00:00+05:30"},
-      {"sessionId":"S100","fromRoomId":null,"toRoomId":"HALL_LARGE","startAt":"2026-11-02T09:00:00+05:30","endAt":"2026-11-02T11:00:00+05:30"}
-    ],
-    "costBreakdown": {"displacedExistingSessions":1,"timeChangedSessions":0,"buildingChangedSessions":0,"totalUnusedSeats":60,"cost":106},
-    "reasons": ["Move the 40-student lecture to release a 150-seat hall."]
-  }]
+  "sessionId": "S007",
+  "fromRoomId": null,
+  "toRoomId": "HALL_A",
+  "startAt": "2026-11-16T09:00:00+05:30",
+  "endAt": "2026-11-16T11:00:00+05:30"
 }
 ```
 
-Score request: `{"scenarioId":"scenario-demo-01","scenarioRevision":3,"candidateIds":["candidate-001"]}`. Response: `{"rankedCandidates":[{"candidateId":"candidate-001","cost":106,"validationStatus":"pending"}]}`. Pending candidates are previews, not verified solutions.
+Each candidate also has a stable bounded `candidateId`, `validationStatus: "pending"`, `displacedExistingSessions: 0` and reasons. Its ID hashes the scenario/revision, facilities version and exact move; it is not approval evidence. Room-ID order is deterministic, while `runId` changes per request. The current room is excluded to avoid no-op moves. `roomChecks` contains only processed non-current destinations and their rejection reasons.
 
-No-solution example: `{"runId":"opt-002","candidates":[],"truncated":false,"reasons":["No assignment within the allowed window and move limit."]}`. This is a successful search result, not an HTTP server error.
+`allowedMoveCount` greater than zero does not enable swaps yet, and a wider `searchWindow` does not change session times. No costs or rankings are returned. The relocation fixture therefore returns 200 with `candidates: []`, `truncated: false` and a direct-search explanation, even though a relocation could recover it later.
+
+`maxCandidates` bounds returned candidates. Finding exactly that many does not imply truncation: remaining rooms are checked until another eligible destination proves omission or the search finishes. `timeoutMs` is a soft monotonic-clock budget for the search loop after inputs are prepared. It is checked between rooms and cannot interrupt a synchronous room check. Limit exhaustion returns 200 with `truncated: true` and a reason; an incomplete empty search does not establish no solution.
+
+Input preparation waits at most 5000ms by default, separately from the search budget. Failed reads produce a sanitized 503; a read deadline produces 504. Strict request/snapshot errors retain 422, missing scenarios/sessions 404, and stale revisions 409, all with the response trace ID. Only trusted `AllocationInputError` instances supply domain status/details; unexpected errors remain generic 500 responses. Results are not stored yet, and allocation never applies a candidate.
 
 ## 9. Integration and Agentic AI usage
 
@@ -254,12 +247,20 @@ npm.cmd run preview:rooms -- equipment-failure
 
 Available fixture names are `single-relocation`, `direct-room`, `equipment-failure` and `no-solution`. Output is explicitly `mode: "fixture"` and `validationStatus: "pending"`. It contains the request, affected session and versioned schedule/room context; it contains no generated candidates or fixture `expected` answers. Unknown fixture names fail rather than falling back to another scenario.
 
-The room-check command produces a room-only report rather than the full input snapshot. In the equipment-failure case, LAB_A reports 40 effective working computers and is rejected for S002's 50-computer requirement; LAB_BACKUP passes. Other fixtures can be selected using the same command argument. HTTP allocation routes remain unimplemented.
+The room-check command produces a room-only report rather than the full input snapshot. In the equipment-failure case, LAB_A reports 40 effective working computers and is rejected for S002's 50-computer requirement; LAB_BACKUP passes. The candidate endpoint then proposes the actual target-only move to LAB_BACKUP, excluding the current room from its destination list.
 
 In a second PowerShell terminal:
 
 ```powershell
 Invoke-RestMethod http://localhost:4001/health
+
+$body = @{
+  scenarioId = 'scenario-direct-001'
+  scenarioRevision = 3
+  affectedSessionId = 'S007'
+  allowedMoveCount = 0
+} | ConvertTo-Json
+Invoke-RestMethod -Method Post -Uri http://localhost:4001/allocation/candidates -ContentType 'application/json' -Body $body
 ```
 
 `src/app.js` constructs the Express app without listening or loading private configuration. `src/server.js` loads configuration and starts the listener. The HTTP service and tests run without MongoDB, Platform, Facilities or an LLM.
@@ -283,11 +284,11 @@ The template's `SPRING_PORT=8080` does not override the current hardcoded Java p
 
 ## 12. Dummy-data workflow and testing
 
-Run `npm.cmd test` from the service directory. Current checks cover HTTP/configuration, strict inputs, normalization, fixture isolation, revision/reference errors, both preview commands, OpenAPI references/examples and room checks. Room tests include exact capacity/computer limits, partial closures/outages, multiple/zero computer caps, missing facilities, adjacent/offset-equivalent intervals, self-booking exclusion, blocker IDs and unchanged source data. Environment tests use temporary files instead of private root configuration. Candidate generation and live integration are not implemented.
+Run `npm.cmd test` from the service directory. Checks cover HTTP/configuration, strict inputs, normalization, fixture isolation, revisions/references, both preview commands, OpenAPI and room checks, plus direct candidate generation and its actual HTTP responses. Candidate tests cover original-time moves, zero displaced sessions, stable IDs/order, current-room exclusion, exact/overflow candidate limits, deterministic time budgets, sanitized dependency failures and unchanged source data. Environment tests use temporary files instead of private root configuration. Live integration is not implemented.
 
 `prepareAllocationInput(request, { platformClient, facilitiesClient })` validates the request before reading the two clients, combines their snapshots and rejects mismatched scenarios/revisions, missing sessions and invalid room references. Fixture clients implement `getScenarioSnapshot(scenarioId)` and `getRoomSnapshot()`, return fresh copies and expose no mutation methods. Dependency failures propagate; no successful candidate or validity is invented.
 
-The following workflow and candidate tests describe the intended algorithm implementation:
+The following workflow and tests cover direct search and the broader intended recovery implementation:
 
 1. Start with [sample timetable](../../examples/sample_timetable.csv) and [sample facilities](../../examples/sample_facilities.json). Build mapping adapters without changing shared samples to satisfy a test.
 2. Add S010/S100 from section 4 as another fictional fixture. Reuse the same IDs/intervals across services.
@@ -332,7 +333,7 @@ Sanitize logs. Authentication does not automatically grant administrator privile
 
 Demonstrate the 100-seat case: direct search fails, relocation succeeds, both moves appear in the preview, Spring Boot validates, an administrator approves through Operations, and Spring Boot alone changes the simulation. Refresh the platform timetable to prove application; keep the baseline unchanged. Also show a no-solution case.
 
-- [ ] Direct search and rejection reasons work with dummy data.
+- [x] Direct search and rejection reasons work with fictional fixture data.
 - [ ] Suitability, swaps and bounded multi-step algorithms are tested.
 - [ ] Alternative slots preserve duration and respect availability.
 - [ ] Scores and cost components are reproducible.

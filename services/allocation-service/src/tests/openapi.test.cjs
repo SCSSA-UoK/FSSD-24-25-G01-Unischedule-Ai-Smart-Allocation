@@ -3,6 +3,9 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const YAML = require('yaml');
+const httpRequest = require('supertest');
+const { createApp } = require('../app');
+const { loadFixture } = require('../clients/fixture-clients');
 const { parseCandidateRequest } = require('../validation/allocation-input');
 
 const contractPath = path.resolve(__dirname, '../../../../contracts/openapi/allocation.openapi.yaml');
@@ -38,18 +41,31 @@ function checkRequestKeys(request) {
   }
 }
 
-test('draft OpenAPI identifies the implemented health route and keeps candidate APIs planned', () => {
+function checkObjectFields(value, schema) {
+  for (const field of schema.required || []) {
+    assert.ok(Object.hasOwn(value, field), `Missing documented response field: ${field}`);
+  }
+  if (schema.additionalProperties === false) {
+    for (const field of Object.keys(value)) {
+      assert.ok(Object.hasOwn(schema.properties, field), `Undocumented response field: ${field}`);
+    }
+  }
+}
+
+test('draft OpenAPI identifies health and direct candidates as implemented while scoring stays planned', () => {
   assert.equal(contract.openapi, '3.1.0');
-  assert.equal(contract.info.version, '0.2.0');
+  assert.equal(contract.info.version, '0.3.0');
   assert.equal(contract.servers[0].url, 'http://localhost:4001');
   assert.deepEqual(Object.keys(contract.paths).sort(), [
     '/allocation/candidates', '/allocation/score', '/health',
   ]);
   assert.equal(contract.paths['/health'].get['x-implementation-status'], 'implemented');
-  for (const route of ['/allocation/candidates', '/allocation/score']) {
-    const operation = contract.paths[route].post;
-    assert.equal(operation['x-implementation-status'], 'planned');
-    assert.match(operation.description, /404/);
+  assert.equal(contract.paths['/allocation/candidates'].post['x-implementation-status'], 'implemented');
+  assert.equal(contract.paths['/allocation/score'].post['x-implementation-status'], 'planned');
+  assert.match(contract.paths['/allocation/score'].post.description, /404/);
+  const responses = contract.paths['/allocation/candidates'].post.responses;
+  for (const status of ['200', '400', '404', '409', '413', '415', '422', '503', '504', '500']) {
+    assert.ok(responses[status], `Missing documented candidate response: ${status}`);
   }
   assert.ok(Object.keys(contract.paths).every((route) => !/apply|bookings/i.test(route)));
 });
@@ -117,4 +133,91 @@ test('fictional fixture requests use documented fields and pass local request va
     assert.equal(fixture.request.scenarioId, fixture.scenarioId, filename);
     assert.equal(fixture.request.scenarioRevision, fixture.scenarioRevision, filename);
   }
+});
+
+test('actual candidate responses follow documented fixture-only fields and direct-move bounds', async () => {
+  const schemas = contract.components.schemas;
+  const operation = contract.paths['/allocation/candidates'].post;
+  const responseSchema = resolveReference(operation.responses['200'].content['application/json'].schema.$ref);
+  const candidateSchema = resolveReference(responseSchema.properties.candidates.items.$ref);
+  const moveSchema = resolveReference(candidateSchema.properties.moves.items.$ref);
+  const roomSchema = resolveReference(responseSchema.properties.roomChecks.items.$ref);
+  const idPattern = new RegExp(schemas.Id.pattern);
+  const app = createApp();
+  const runIds = new Set();
+
+  assert.equal(candidateSchema.properties.moves.minItems, 1);
+  assert.equal(candidateSchema.properties.moves.maxItems, 1);
+  assert.equal(candidateSchema.properties.displacedExistingSessions.const, 0);
+  for (const name of ['direct-room', 'single-relocation', 'equipment-failure', 'no-solution']) {
+    const fixture = loadFixture(name);
+    const response = await httpRequest(app).post('/allocation/candidates').send(fixture.request).expect(200);
+    const result = response.body;
+    checkObjectFields(result, responseSchema);
+    assert.equal(typeof response.headers['x-request-id'], 'string');
+    assert.match(result.runId, idPattern);
+    assert.ok(!runIds.has(result.runId), 'Each response must identify a separate run');
+    runIds.add(result.runId);
+    for (const field of ['mode', 'scope', 'validationStatus']) {
+      assert.equal(result[field], responseSchema.properties[field].const);
+    }
+    assert.equal(result.scenarioId, fixture.scenarioId);
+    assert.equal(result.scenarioRevision, fixture.scenarioRevision);
+    assert.equal(result.facilitiesVersion, fixture.facilitiesVersion);
+    assert.equal(typeof result.truncated, 'boolean');
+    assert.ok(result.candidates.length <= fixture.request.limits.maxCandidates);
+    assert.ok(result.candidates.length <= responseSchema.properties.candidates.maxItems);
+    assert.ok(result.roomChecks.length <= responseSchema.properties.roomChecks.maxItems);
+    assert.ok(result.reasons.every((reason) => typeof reason === 'string'));
+
+    const target = fixture.sessions.find((session) => session.sessionId === fixture.request.affectedSessionId);
+    const destinations = [];
+    for (const candidate of result.candidates) {
+      checkObjectFields(candidate, candidateSchema);
+      assert.match(candidate.candidateId, idPattern);
+      assert.equal(candidate.validationStatus, candidateSchema.properties.validationStatus.const);
+      assert.equal(candidate.displacedExistingSessions, 0);
+      assert.equal(candidate.moves.length, 1);
+      assert.ok(candidate.reasons.every((reason) => typeof reason === 'string'));
+      const move = candidate.moves[0];
+      checkObjectFields(move, moveSchema);
+      assert.equal(move.sessionId, target.sessionId);
+      assert.equal(move.fromRoomId, target.roomId);
+      assert.notEqual(move.toRoomId, move.fromRoomId);
+      assert.ok(fixture.rooms.some((room) => room.roomId === move.toRoomId));
+      assert.equal(move.startAt, target.startAt);
+      assert.equal(move.endAt, target.endAt);
+      destinations.push(move.toRoomId);
+    }
+    assert.deepEqual(destinations, [...destinations].sort());
+    for (const room of result.roomChecks) {
+      checkObjectFields(room, roomSchema);
+      assert.notEqual(room.roomId, target.roomId);
+      for (const field of ['suitable', 'available', 'eligible']) assert.equal(typeof room[field], 'boolean');
+      assert.equal(room.eligible, room.suitable && room.available);
+      assert.ok(Number.isInteger(room.effectiveUsableComputers));
+      assert.ok(room.effectiveUsableComputers >= roomSchema.properties.effectiveUsableComputers.minimum);
+      assert.ok(room.effectiveUsableComputers <= roomSchema.properties.effectiveUsableComputers.maximum);
+      for (const field of ['missingFacilities', 'activeRestrictionIds', 'blockingSessionIds']) {
+        assert.equal(new Set(room[field]).size, room[field].length);
+        for (const id of room[field]) assert.match(id, idPattern);
+      }
+      for (const reason of room.reasons) {
+        checkObjectFields(reason, roomSchema.properties.reasons.items);
+        assert.ok(roomSchema.properties.reasons.items.properties.code.enum.includes(reason.code));
+        assert.equal(typeof reason.message, 'string');
+      }
+    }
+  }
+});
+
+test('documented planned scoring endpoint still returns an unknown-route error', async () => {
+  const operation = contract.paths['/allocation/score'].post;
+  const example = operation.requestBody.content['application/json'].example;
+  const response = await httpRequest(createApp()).post('/allocation/score').send(example).expect(404);
+  const errorSchema = resolveReference(resolveReference(operation.responses['404'].$ref)
+    .content['application/json'].schema.$ref);
+  checkObjectFields(response.body, errorSchema);
+  assert.equal(response.body.code, 'NOT_FOUND');
+  assert.equal(response.body.traceId, response.headers['x-request-id']);
 });
