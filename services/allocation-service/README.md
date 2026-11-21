@@ -6,7 +6,7 @@
 
 This service recommends rooms and recovery arrangements. It searches empty rooms, explores moving existing lectures, and compares solutions. It must never update official or simulated timetable bookings. Spring Boot alone validates scheduling and applies administrator-approved simulation changes.
 
-**Available now:** a runnable Express service, `GET /health`, root environment configuration, consistent JSON errors, request/snapshot validation, read-only fixture clients, sample-data normalizers, and [four fictional acceptance fixtures](fixtures/README.md). `npm.cmd run preview:input -- direct-room` prepares normalized fixture inputs; `npm.cmd test` runs the tests. Allocation algorithms, allocation endpoints, database persistence and allocation UI pages are still **planned**.
+**Available now:** a runnable Express service, `GET /health`, root configuration, JSON errors, validated fixture inputs, and local room checks for capacity, required facilities, working computers, restrictions and booking overlaps. [Four fictional fixtures](fixtures/README.md) support independent testing. `npm.cmd run preview:input -- direct-room` prepares inputs; `npm.cmd run preview:rooms -- equipment-failure` reports room checks and rejection reasons. Candidate generation, ranking, allocation HTTP endpoints, persistence and allocation UI pages are still **planned**.
 
 `GET /health` returns `200` with `{"status":"ok","service":"allocation-service"}`. This is a liveness check: it does not connect to or report readiness for MongoDB, Platform or Facilities. Each response has a generated `X-Request-Id`; errors include the same value as `traceId`. Unknown routes return a JSON `404`, malformed JSON returns `400`, JSON bodies over 100kb return `413`, and unsupported body encodings return `415`. Unexpected failures return a generic `500` without internal error details.
 
@@ -102,6 +102,20 @@ The current Java models use recurring weekday/time fields and lack the normalize
 
 Request validation accepts bounded IDs, nonnegative safe scenario revisions, `allowedMoveCount` from 0 to 3, and optional preferences/search limits. Defaults are `minimizeChanges: true`, `maxCandidates: 10` and `timeoutMs: 2000`; maximum limits are 50 candidates and 10000ms. An optional dated search window must run forwards, span at most seven days and contain the entire affected session. Validation rejects unknown fields, missing requirements, invalid calendar dates, reversed intervals, duplicate IDs and unknown room/session references. These are input checks, not authoritative scheduling validation.
 
+### Local room checks
+
+`inspectRoomOptions(request, clients)` uses the validated input-preparation boundary, then checks every room at the affected session's existing time. It returns stable, ID-sorted `roomChecks` and `eligibleRoomIds`, along with the scenario revision and facilities version. Output retains `mode: "fixture"`, `scope: "room-checks-only"` and `validationStatus: "pending"`; it contains no moves or candidates.
+
+- `suitable` means the room meets these physical capacity, equipment and restriction checks.
+- `available` means no other session occupies that room during the affected interval. The target's own booking is excluded by session ID; every other overlapping booking remains a blocker.
+- `eligible` requires both. This is local room eligibility, not proof of lecturer/group availability or whole-plan validity.
+- Intervals are half-open and compared as parsed instants, so adjacent sessions do not overlap and equivalent timestamps with different offsets compare correctly. No travel/setup buffer is applied.
+- Any overlapping closure rejects a room. Outages remove affected facilities; working-computer caps use the minimum of the baseline and all overlapping caps. Zero is a real cap, null is no cap, and a cap never increases the baseline. Counts already reduced in a snapshot are not reduced twice.
+
+Checks accumulate reasons with `code` and `message`: `CAPACITY_EXCEEDED`, `MISSING_FACILITY`, `INSUFFICIENT_COMPUTERS`, `ROOM_CLOSED` and `ROOM_OCCUPIED`. Each result also reports effective computers, missing facilities, active restriction IDs and blocking session IDs. An empty eligible list means no room passes these direct checks; it does not prove that relocation or another recovery plan is impossible.
+
+`checkRoomSuitability()` and `findRoomConflicts()` are reusable helpers for individual room facts and bookings. For a complete request, use `inspectRoomOptions()` so scenario/revision checks and cross-room reference validation run first. Room inspection does not write bookings or call external services.
+
 ## 6. Stack and folder structure
 
 The service uses CommonJS, Express, dotenv and Zod. Tests use Node's built-in test runner, Supertest and YAML parsing for contract checks. Node.js 22 or later is required. The service does not use a database or live external API client yet.
@@ -116,12 +130,13 @@ services/allocation-service/
     app.js
     config/env.js
     preview-input.js            # local fixture-input command
+    preview-rooms.js            # local room-check command
     routes/health.js
     middleware/                # request IDs and error responses
     tests/                     # HTTP, environment and fixture checks
     controllers/               # placeholder
-    services/                  # input preparation; search/ranking still pending
-    algorithms/                # placeholder: direct, swaps, bounded search
+    services/                  # input preparation and room inspection
+    algorithms/                # interval overlap and room suitability/occupancy checks
     clients/                   # read-only fixture clients and sample normalizers
     models/                    # placeholder
     validation/                # request, session, room and snapshot schemas
@@ -234,9 +249,12 @@ Prepare input without starting HTTP, MongoDB or other services:
 
 ```powershell
 npm.cmd run preview:input -- direct-room
+npm.cmd run preview:rooms -- equipment-failure
 ```
 
 Available fixture names are `single-relocation`, `direct-room`, `equipment-failure` and `no-solution`. Output is explicitly `mode: "fixture"` and `validationStatus: "pending"`. It contains the request, affected session and versioned schedule/room context; it contains no generated candidates or fixture `expected` answers. Unknown fixture names fail rather than falling back to another scenario.
+
+The room-check command produces a room-only report rather than the full input snapshot. In the equipment-failure case, LAB_A reports 40 effective working computers and is rejected for S002's 50-computer requirement; LAB_BACKUP passes. Other fixtures can be selected using the same command argument. HTTP allocation routes remain unimplemented.
 
 In a second PowerShell terminal:
 
@@ -265,7 +283,7 @@ The template's `SPRING_PORT=8080` does not override the current hardcoded Java p
 
 ## 12. Dummy-data workflow and testing
 
-Run `npm.cmd test` from the service directory. Current checks cover HTTP/configuration, strict requests and snapshots, source-data normalization, fixture isolation, revision/reference errors, the input-preview command and OpenAPI references/examples. Environment tests use temporary files instead of reading private root configuration. Fixture checks verify hand-written example data; candidate generation and live integration are not implemented.
+Run `npm.cmd test` from the service directory. Current checks cover HTTP/configuration, strict inputs, normalization, fixture isolation, revision/reference errors, both preview commands, OpenAPI references/examples and room checks. Room tests include exact capacity/computer limits, partial closures/outages, multiple/zero computer caps, missing facilities, adjacent/offset-equivalent intervals, self-booking exclusion, blocker IDs and unchanged source data. Environment tests use temporary files instead of private root configuration. Candidate generation and live integration are not implemented.
 
 `prepareAllocationInput(request, { platformClient, facilitiesClient })` validates the request before reading the two clients, combines their snapshots and rejects mismatched scenarios/revisions, missing sessions and invalid room references. Fixture clients implement `getScenarioSnapshot(scenarioId)` and `getRoomSnapshot()`, return fresh copies and expose no mutation methods. Dependency failures propagate; no successful candidate or validity is invented.
 

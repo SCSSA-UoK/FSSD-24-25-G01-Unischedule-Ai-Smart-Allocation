@@ -12,7 +12,8 @@
     "dev": "node --watch src/server.js",
     "start": "node src/server.js",
     "test": "node --test",
-    "preview:input": "node src/preview-input.js"
+    "preview:input": "node src/preview-input.js",
+    "preview:rooms": "node src/preview-rooms.js"
   },
   "dependencies": {
     "dotenv": "^18.0.10",

@@ -119,6 +119,15 @@ const RestrictionSchema = z.object({
   }
 });
 
+const IntervalSchema = z.object({ startAt: timestamp, endAt: timestamp }).strict()
+  .superRefine(checkInterval);
+const SessionListSchema = z.array(SessionSchema).max(5000).superRefine((value, context) => {
+  checkUniqueIds(value, 'sessionId', 'sessions', context);
+});
+const RestrictionListSchema = z.array(RestrictionSchema).max(5000).superRefine((value, context) => {
+  checkUniqueIds(value, 'restrictionId', 'restrictions', context);
+});
+
 const FacilitiesSnapshotSchema = z.object({
   mode: z.literal('fixture'),
   facilitiesVersion: id,
@@ -149,8 +158,12 @@ module.exports = {
   PlatformSnapshotSchema,
   FacilitiesSnapshotSchema,
   parseCandidateRequest: (value) => parse(CandidateRequestSchema, value),
+  parseId: (value) => parse(id, value),
+  parseInterval: (value) => parse(IntervalSchema, value),
   parseSession: (value) => parse(SessionSchema, value),
+  parseSessions: (value) => parse(SessionListSchema, value),
   parseRoom: (value) => parse(RoomSchema, value),
+  parseRestrictions: (value) => parse(RestrictionListSchema, value),
   parsePlatformSnapshot: (value) => parse(PlatformSnapshotSchema, value),
   parseFacilitiesSnapshot: (value) => parse(FacilitiesSnapshotSchema, value),
 };

@@ -11,6 +11,8 @@ These four datasets are fictional inputs for independent development. Each has e
 
 From the allocation-service directory, run `npm.cmd run preview:input -- <fixture-name>`. This prepares validated input with `mode: "fixture"` and `validationStatus: "pending"`; it does not run allocation search or produce candidates. Fixture names are allowlisted, and returned data is copied so a caller cannot alter the stored example. `npm.cmd test` checks all input adapters, normalizers and schemas.
 
+Use `npm.cmd run preview:rooms -- <fixture-name>` for actual local room screening. The report includes sorted eligible room IDs and physical/booking rejection reasons while retaining fixture mode and pending validation. Tests compare those IDs with the hand-written direct-room expectations: HALL_A for `direct-room`, LAB_BACKUP for `equipment-failure`, and none for the other two cases. An empty list does not prove that no relocation or broader recovery exists. No moves or bookings are produced.
+
 ## The relocation example
 
 `single-relocation.json` describes the 60-student example in the [shared workflow](../../../docs/02-end-to-end-workflow.md). All IDs and records are fictional. Room capacities and IDs follow the [shared facilities sample](../../../examples/sample_facilities.json).
@@ -38,7 +40,7 @@ This fixture makes the existing [proposed interface](../../../docs/04-service-in
 - `request.allowedMoveCount` limits displaced existing sessions, excluding the target. The returned move list still includes the target.
 - `expected` contains hand-written acceptance data, not output from an implemented optimizer. The proposal stays `pending`; a fixture check cannot establish authoritative validity.
 
-Restrictions in the other examples use `restrictionId`, `roomId`, `kind`, dated `startAt`/`endAt`, `unavailableFacilities`, nullable `usableComputers` and a reason. A working-computer restriction is an effective count cap, not a number to subtract. In the equipment-failure snapshot, LAB_A already has 40 usable computers after the fault; do not subtract the same outage again. LAB_BACKUP is an additional fictional room, not a change to the shared facilities sample. The no-solution example closes ROOM_C for the full interval. No algorithm has yet proved the expected outcomes.
+Restrictions in the other examples use `restrictionId`, `roomId`, `kind`, dated `startAt`/`endAt`, `unavailableFacilities`, nullable `usableComputers` and a reason. A working-computer restriction is an effective count cap, not a number to subtract. In the equipment-failure snapshot, LAB_A already has 40 usable computers after the fault; the room check keeps the effective count at 40. LAB_BACKUP is an additional fictional room, not a change to the shared facilities sample. The no-solution example closes ROOM_C for the full interval. Local direct-room checks are implemented; relocation proposals and whole-plan validation remain outside these checks.
 
 ## Reproduce the checks
 
