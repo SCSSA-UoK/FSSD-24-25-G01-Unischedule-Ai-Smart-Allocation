@@ -1,0 +1,21 @@
+{
+  "name": "unischedule-facilities-service",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Campus facilities service.",
+  "type": "commonjs",
+  "main": "src/app.js",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "node --watch src/server.js",
+    "start": "node src/server.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "dotenv": "^18.0.10",
+    "express": "^5.3.0",
+    "mongoose": "^9.0.0"
+  }
+}
