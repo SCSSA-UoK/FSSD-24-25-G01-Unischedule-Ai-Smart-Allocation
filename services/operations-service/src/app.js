@@ -3,6 +3,7 @@ const { traceId } = require('./middleware/trace-id');
 const { notFound, errorHandler } = require('./middleware/error-handler');
 const { healthRouter } = require('./routes/health');
 const { disruptionsRouter } = require('./routes/disruptions');
+const { recoveryCasesRouter } = require('./routes/recovery-cases');
 
 function createApp() {
   const app = express();
@@ -12,6 +13,7 @@ function createApp() {
 
   app.use(healthRouter);
   app.use(disruptionsRouter);
+  app.use(recoveryCasesRouter);
 
   app.use(notFound);
   app.use(errorHandler);

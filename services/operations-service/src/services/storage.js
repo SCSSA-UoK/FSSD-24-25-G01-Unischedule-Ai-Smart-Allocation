@@ -3,6 +3,21 @@ const { DisruptionModel } = require('../models/disruption');
 const { RecoveryCaseModel } = require('../models/recovery-case');
 const { AuditLogModel } = require('../models/audit-log');
 
+const PRIORITY_WEIGHT = {
+  critical: 4,
+  high: 3,
+  normal: 2,
+  low: 1
+};
+
+function compareCaseQueueOrder(a, b) {
+  const weightDiff = (PRIORITY_WEIGHT[b.priority] || 0) - (PRIORITY_WEIGHT[a.priority] || 0);
+  if (weightDiff !== 0) {
+    return weightDiff;
+  }
+  return new Date(a.createdAt) - new Date(b.createdAt);
+}
+
 class Storage {
   constructor() {
     this.disruptions = new Map();
@@ -88,6 +103,72 @@ class Storage {
     }
     const item = this.recoveryRequests.get(caseId);
     return item ? { ...item } : null;
+  }
+
+  async listRecoveryRequests({ status, priority, scenarioId, from, to, limit = 20, offset = 0 } = {}) {
+    let items;
+    if (this.isMongoConnected) {
+      const query = {};
+      if (status) query.status = status;
+      if (priority) query.priority = priority;
+      if (scenarioId) query.scenarioId = scenarioId;
+      items = await RecoveryCaseModel.find(query).lean();
+    } else {
+      items = Array.from(this.recoveryRequests.values()).map((c) => ({ ...c }));
+      if (status) items = items.filter((c) => c.status === status);
+      if (priority) items = items.filter((c) => c.priority === priority);
+      if (scenarioId) items = items.filter((c) => c.scenarioId === scenarioId);
+    }
+
+    if (from) {
+      const fromTime = Date.parse(from);
+      items = items.filter((c) => Date.parse(c.createdAt) >= fromTime);
+    }
+    if (to) {
+      const toTime = Date.parse(to);
+      items = items.filter((c) => Date.parse(c.createdAt) <= toTime);
+    }
+
+    items.sort(compareCaseQueueOrder);
+
+    const total = items.length;
+    const paged = items.slice(offset, offset + limit);
+    const nextCursor = offset + paged.length < total ? String(offset + paged.length) : null;
+
+    return { items: paged, nextCursor, total };
+  }
+
+  async updateRecoveryRequestWithVersion(caseId, expectedVersion, updates) {
+    const nextVersion = expectedVersion + 1;
+    const updatedAt = new Date().toISOString();
+
+    if (this.isMongoConnected) {
+      const updated = await RecoveryCaseModel.findOneAndUpdate(
+        { caseId, version: expectedVersion },
+        { $set: { ...updates, version: nextVersion, updatedAt } },
+        { returnDocument: 'after' }
+      ).lean();
+
+      if (!updated) {
+        return null;
+      }
+      this.recoveryRequests.set(caseId, { ...updated });
+      return updated;
+    }
+
+    const current = this.recoveryRequests.get(caseId);
+    if (!current || current.version !== expectedVersion) {
+      return null;
+    }
+
+    const updated = {
+      ...current,
+      ...updates,
+      version: nextVersion,
+      updatedAt
+    };
+    this.recoveryRequests.set(caseId, updated);
+    return { ...updated };
   }
 
   async saveAuditLog(entry) {
