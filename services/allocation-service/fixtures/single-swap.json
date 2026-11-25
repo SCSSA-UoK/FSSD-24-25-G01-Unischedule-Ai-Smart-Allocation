@@ -1,0 +1,127 @@
+{
+  "fixtureVersion": 1,
+  "notice": "Fictional simulation data. The target is assigned to an undersized room; this two-room exchange is a hand-written expectation, not a generated or platform-validated result.",
+  "mode": "fixture",
+  "scenarioId": "scenario-swap-001",
+  "scenarioRevision": 3,
+  "facilitiesVersion": "fixture-v1",
+  "timezone": "Asia/Colombo",
+  "constraints": {
+    "allowTimeChanges": false,
+    "lecturerUnavailability": [],
+    "studentGroupUnavailability": []
+  },
+  "rooms": [
+    {
+      "roomId": "HALL_A",
+      "seats": 80,
+      "features": [
+        "projector",
+        "sound"
+      ],
+      "usableComputers": 0,
+      "building": "Main"
+    },
+    {
+      "roomId": "ROOM_C",
+      "seats": 50,
+      "features": [
+        "projector"
+      ],
+      "usableComputers": 0,
+      "building": "Main"
+    },
+    {
+      "roomId": "LAB_A",
+      "seats": 70,
+      "features": [
+        "computers",
+        "projector"
+      ],
+      "usableComputers": 65,
+      "building": "IT"
+    }
+  ],
+  "restrictions": [],
+  "sessions": [
+    {
+      "sessionId": "S001",
+      "lecturerId": "L001",
+      "studentGroupId": "G1",
+      "roomId": "HALL_A",
+      "registeredStudents": 40,
+      "requiredFacilities": [
+        "projector"
+      ],
+      "requiredWorkingComputers": 0,
+      "startAt": "2026-11-16T09:00:00+05:30",
+      "endAt": "2026-11-16T11:00:00+05:30"
+    },
+    {
+      "sessionId": "S002",
+      "lecturerId": "L002",
+      "studentGroupId": "G2",
+      "roomId": "LAB_A",
+      "registeredStudents": 60,
+      "requiredFacilities": [
+        "computers",
+        "projector"
+      ],
+      "requiredWorkingComputers": 50,
+      "startAt": "2026-11-16T09:00:00+05:30",
+      "endAt": "2026-11-16T11:00:00+05:30"
+    },
+    {
+      "sessionId": "S007",
+      "lecturerId": "L007",
+      "studentGroupId": "G7",
+      "roomId": "ROOM_C",
+      "registeredStudents": 60,
+      "requiredFacilities": [
+        "projector"
+      ],
+      "requiredWorkingComputers": 0,
+      "startAt": "2026-11-16T09:00:00+05:30",
+      "endAt": "2026-11-16T11:00:00+05:30"
+    }
+  ],
+  "request": {
+    "scenarioId": "scenario-swap-001",
+    "scenarioRevision": 3,
+    "affectedSessionId": "S007",
+    "allowedMoveCount": 1,
+    "preferences": {
+      "minimizeChanges": true
+    },
+    "limits": {
+      "maxCandidates": 10,
+      "timeoutMs": 2000
+    }
+  },
+  "expected": {
+    "directRoomIds": [],
+    "displacedExistingSessions": 1,
+    "proposal": {
+      "scenarioId": "scenario-swap-001",
+      "scenarioRevision": 3,
+      "validationStatus": "pending",
+      "moves": [
+        {
+          "sessionId": "S001",
+          "fromRoomId": "HALL_A",
+          "toRoomId": "ROOM_C",
+          "startAt": "2026-11-16T09:00:00+05:30",
+          "endAt": "2026-11-16T11:00:00+05:30"
+        },
+        {
+          "sessionId": "S007",
+          "fromRoomId": "ROOM_C",
+          "toRoomId": "HALL_A",
+          "startAt": "2026-11-16T09:00:00+05:30",
+          "endAt": "2026-11-16T11:00:00+05:30"
+        }
+      ],
+      "kind": "swap"
+    }
+  }
+}

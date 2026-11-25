@@ -1,41 +1,8 @@
-const { createHash, randomUUID } = require('node:crypto');
+const { randomUUID } = require('node:crypto');
 const { performance } = require('node:perf_hooks');
-const { AllocationInputError, parseCandidateRequest } = require('../validation/allocation-input');
-const { prepareAllocationInput } = require('./prepare-allocation-input');
+const { prepareCandidateInput } = require('./prepare-candidate-input');
+const { createCandidateId } = require('../algorithms/candidate-id');
 const { evaluateRoomChecks } = require('../algorithms/room-checks');
-
-async function readDependency(read) {
-  try {
-    return await read();
-  } catch (error) {
-    if (error instanceof AllocationInputError) throw error;
-    throw new AllocationInputError(503, 'DEPENDENCY_UNAVAILABLE', 'Schedule or facilities data is unavailable.');
-  }
-}
-
-async function prepareWithTimeout(request, clients, timeoutMs) {
-  let timer;
-  const guardedClients = {
-    platformClient: {
-      getScenarioSnapshot: (scenarioId) => readDependency(() => clients.platformClient.getScenarioSnapshot(scenarioId)),
-    },
-    facilitiesClient: {
-      getRoomSnapshot: () => readDependency(() => clients.facilitiesClient.getRoomSnapshot()),
-    },
-  };
-  try {
-    return await Promise.race([
-      prepareAllocationInput(request, guardedClients),
-      new Promise((resolve, reject) => {
-        timer = setTimeout(() => reject(new AllocationInputError(
-          504, 'DEPENDENCY_TIMEOUT', 'Schedule or facilities data did not arrive within the time limit.',
-        )), timeoutMs);
-      }),
-    ]);
-  } finally {
-    clearTimeout(timer);
-  }
-}
 
 function makeCandidate(input, room) {
   const session = input.affectedSession;
@@ -46,13 +13,8 @@ function makeCandidate(input, room) {
     startAt: session.startAt,
     endAt: session.endAt,
   };
-  const identity = [
-    input.snapshot.scenarioId, input.snapshot.scenarioRevision, input.snapshot.facilitiesVersion,
-    move.sessionId, move.fromRoomId, move.toRoomId, move.startAt, move.endAt,
-  ];
-  const digest = createHash('sha256').update(JSON.stringify(identity)).digest('hex').slice(0, 24);
   return {
-    candidateId: `candidate-${digest}`,
+    candidateId: createCandidateId(input, [move]),
     validationStatus: 'pending',
     displacedExistingSessions: 0,
     moves: [move],
@@ -66,11 +28,8 @@ function makeCandidate(input, room) {
 async function generateDirectCandidates(rawRequest, clients, {
   clock = () => performance.now(), dependencyTimeoutMs = 5000,
 } = {}) {
-  const request = parseCandidateRequest(rawRequest);
-  if (!Number.isInteger(dependencyTimeoutMs) || dependencyTimeoutMs < 1) {
-    throw new RangeError('dependencyTimeoutMs must be a positive integer.');
-  }
-  const input = await prepareWithTimeout(request, clients, dependencyTimeoutMs);
+  const input = await prepareCandidateInput(rawRequest, clients, dependencyTimeoutMs);
+  const request = input.request;
   const startedAt = clock();
   const rooms = input.snapshot.rooms
     .filter((room) => room.roomId !== input.affectedSession.roomId)

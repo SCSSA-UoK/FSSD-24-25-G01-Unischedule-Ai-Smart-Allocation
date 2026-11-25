@@ -1,12 +1,12 @@
 openapi: 3.1.0
 info:
   title: Allocation service contract
-  version: 0.3.0
+  version: 0.4.0
   description: >-
-    Draft for team review. GET /health and POST /allocation/candidates are
-    implemented. Candidate generation uses fictional snapshots and direct
-    room moves only. Scoring remains planned. Authentication, live backend
-    integration and storage are not implemented. Allocation never writes bookings.
+    Draft for team review. Health, direct candidates and single-displacement
+    room-swaps endpoints are implemented with fictional snapshots. Scoring,
+    authentication, live backend integration and storage are not implemented.
+    Every proposal remains pending. Allocation never writes bookings.
 servers:
   - url: http://localhost:4001
 paths:
@@ -35,7 +35,7 @@ paths:
       description: >-
         Fixture-only direct room search at the affected session's original time.
         Known default scenarios are scenario-direct-001, scenario-relocation-001,
-        scenario-equipment-001 and scenario-no-solution-001; unknown scenarios
+        scenario-equipment-001, scenario-no-solution-001 and scenario-swap-001; unknown scenarios
         return 404 without falling back to another fixture. Each pending proposal
         moves only the target to a different eligible room. No existing session
         is displaced. Room checks do not establish lecturer/group availability
@@ -64,6 +64,55 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/CandidateResponse' }
+        '400': { $ref: '#/components/responses/ErrorResponse' }
+        '404': { $ref: '#/components/responses/ErrorResponse' }
+        '409': { $ref: '#/components/responses/ErrorResponse' }
+        '413': { $ref: '#/components/responses/ErrorResponse' }
+        '415': { $ref: '#/components/responses/ErrorResponse' }
+        '422': { $ref: '#/components/responses/ErrorResponse' }
+        '503': { $ref: '#/components/responses/ErrorResponse' }
+        '504': { $ref: '#/components/responses/ErrorResponse' }
+        '500': { $ref: '#/components/responses/ErrorResponse' }
+  /allocation/room-swaps:
+    post:
+      operationId: generateRoomSwapCandidates
+      x-implementation-status: implemented
+      description: >-
+        Fixture-only single displacement. The target destination must meet the
+        target's physical requirements and have exactly one other occupant over
+        its interval. Two blockers are rejected even when they occupy separate
+        portions of that interval. The blocker must fit its alternate room over
+        its own full original interval. Both original assignments are removed
+        and replaced in a copy before checking the final moved sessions against
+        all remaining bookings and restrictions. Exchanging their original rooms
+        is a swap; other eligible destinations produce a relocation. No time
+        changes, multi-step search, scoring, booking writes or authoritative
+        validation occur. Requires JSON and the same fixture catalog as direct
+        search. With valid inputs, allowedMoveCount 0 returns a complete empty
+        200 result with a reason; positive values still displace only one session.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CandidateRequest' }
+            example:
+              scenarioId: scenario-relocation-001
+              scenarioRevision: 3
+              affectedSessionId: S007
+              allowedMoveCount: 1
+              preferences: { minimizeChanges: true }
+              limits: { maxCandidates: 10, timeoutMs: 2000 }
+      responses:
+        '200':
+          description: >-
+            Pending single-displacement proposals or a complete empty search.
+            Search limits can return partial results with truncated true; failed
+            or timed-out dependency reads instead return 503 or 504.
+          headers:
+            X-Request-Id: { $ref: '#/components/headers/RequestId' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SwapResponse' }
         '400': { $ref: '#/components/responses/ErrorResponse' }
         '404': { $ref: '#/components/responses/ErrorResponse' }
         '409': { $ref: '#/components/responses/ErrorResponse' }
@@ -115,7 +164,7 @@ components:
       description: >-
         Flat JSON error. 400 malformed JSON; 404 missing route or ID; 409 stale
         revision; 413 body over 100kb; 415 unsupported body encoding or non-JSON
-        candidate request (UNSUPPORTED_MEDIA_TYPE); 422 invalid input or
+        search request (UNSUPPORTED_MEDIA_TYPE); 422 invalid input or
         requirements; 503 failed dependency read; 504 dependency read timeout;
         500 unexpected failure. Input preparation waits at most 5000ms by default,
         independently of the search-loop budget. Unexpected messages stay generic.
@@ -155,7 +204,8 @@ components:
           maximum: 3
           description: >-
             Maximum other existing sessions displaced, excluding the target.
-            The current direct-only implementation displaces zero even when this is positive.
+            Direct search displaces zero. Room-swaps search displaces one when
+            this is positive, or returns a complete empty result when it is zero.
         preferences:
           type: object
           additionalProperties: false
@@ -165,9 +215,9 @@ components:
           type: object
           additionalProperties: false
           description: >-
-            Candidates retain room-ID order up to maxCandidates. timeoutMs is a
+            Candidates retain stable destination-room ID order up to maxCandidates. timeoutMs is a
             soft monotonic search-loop budget after input preparation, checked
-            between rooms; it cannot interrupt a synchronous room check or bound
+            between target rooms and alternate destinations; it cannot interrupt a synchronous room check or bound
             total HTTP duration. Dependency reads have a separate timeout.
           properties:
             maxCandidates: { type: integer, minimum: 1, maximum: 50, default: 10 }
@@ -179,7 +229,7 @@ components:
           description: >-
             Runtime checks require end after start, at most seven days and full
             containment of the target interval. A wider window does not change
-            the target's original time in the direct-only implementation.
+            either moved session's original time in the implemented searches.
           properties:
             startAt: { $ref: '#/components/schemas/OffsetDateTime' }
             endAt: { $ref: '#/components/schemas/OffsetDateTime' }
@@ -202,7 +252,7 @@ components:
         endAt: { $ref: '#/components/schemas/OffsetDateTime' }
     CostBreakdown:
       type: object
-      description: Proposed future scoring components; not emitted by direct-only candidates.
+      description: Proposed future scoring components; not emitted by implemented candidate endpoints.
       additionalProperties: false
       properties:
         displacedExistingSessions: { type: integer, minimum: 0 }
@@ -227,6 +277,28 @@ components:
           type: array
           minItems: 1
           maxItems: 1
+          items: { $ref: '#/components/schemas/Move' }
+        reasons: { type: array, items: { type: string } }
+    SwapCandidate:
+      type: object
+      additionalProperties: false
+      description: >-
+        Complete pending plan: blocker move first, target move second. Each
+        session retains its own original start/end timestamps and changes rooms.
+        A swap sends the blocker to the target's non-null original room; otherwise
+        the kind is relocation. Identity hashes both canonical moves and snapshot
+        versions; changing run IDs does not change proposal identity. Final room
+        checks remain local, not Platform validation. No costs are emitted.
+      required: [candidateId, validationStatus, kind, displacedExistingSessions, moves, reasons]
+      properties:
+        candidateId: { $ref: '#/components/schemas/Id' }
+        validationStatus: { type: string, const: pending }
+        kind: { type: string, enum: [relocation, swap] }
+        displacedExistingSessions: { type: integer, const: 1 }
+        moves:
+          type: array
+          minItems: 2
+          maxItems: 2
           items: { $ref: '#/components/schemas/Move' }
         reasons: { type: array, items: { type: string } }
     RoomCheck:
@@ -290,6 +362,39 @@ components:
           type: array
           maxItems: 1000
           description: ID-sorted checks for processed non-current rooms; can be partial when truncated.
+          items: { $ref: '#/components/schemas/RoomCheck' }
+        reasons: { type: array, items: { type: string } }
+    SwapResponse:
+      type: object
+      additionalProperties: false
+      required: [runId, mode, scope, validationStatus, scenarioId, scenarioRevision, facilitiesVersion, truncated, candidates, roomChecks, reasons]
+      properties:
+        runId:
+          $ref: '#/components/schemas/Id'
+          description: Unique per response; does not imply stored or retrievable results.
+        mode: { type: string, const: fixture }
+        scope: { type: string, const: single-displacement }
+        validationStatus: { type: string, const: pending }
+        scenarioId: { $ref: '#/components/schemas/Id' }
+        scenarioRevision: { type: integer, minimum: 0, maximum: 9007199254740991 }
+        facilitiesVersion: { $ref: '#/components/schemas/Id' }
+        truncated:
+          type: boolean
+          description: >-
+            True when an additional complete plan was omitted or the soft
+            search budget expired before completion. Merely finding exactly
+            maxCandidates complete plans does not imply truncation.
+        candidates:
+          type: array
+          maxItems: 50
+          items: { $ref: '#/components/schemas/SwapCandidate' }
+        roomChecks:
+          type: array
+          maxItems: 1000
+          description: >-
+            Original-assignment checks for processed prospective target rooms,
+            excluding the current room; may be partial when truncated. These
+            occupied-room diagnostics are not final-assignment validation results.
           items: { $ref: '#/components/schemas/RoomCheck' }
         reasons: { type: array, items: { type: string } }
     ScoreRequest:

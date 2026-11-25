@@ -1,10 +1,11 @@
 # Allocation acceptance fixtures
 
-These four datasets are fictional inputs for independent development. Each has explicit dated sessions, physical room facts, constraints and a versioned request. Its `expected` section is hand-written acceptance data; clients do not return it as a generated answer.
+These five datasets are fictional inputs for independent development. Each has explicit dated sessions, physical room facts, constraints and a versioned request. Its `expected` section is hand-written acceptance data; clients do not return it as a generated answer.
 
 | Fixture name | Scenario ID | Hand-written acceptance story |
 |---|---|---|
 | `single-relocation` | `scenario-relocation-001` | Move S001 to ROOM_C to free HALL_A for S007 |
+| `single-swap` | `scenario-swap-001` | S007 starts in undersized ROOM_C; exchange its room with S001 in HALL_A |
 | `direct-room` | `scenario-direct-001` | HALL_A is empty and can fit S007 |
 | `equipment-failure` | `scenario-equipment-001` | S002 needs 50 computers; LAB_A has 40 working, and LAB_BACKUP has 60 |
 | `no-solution` | `scenario-no-solution-001` | ROOM_C is closed; the same relocation is unavailable within the allowed move count |
@@ -13,7 +14,9 @@ From the allocation-service directory, run `npm.cmd run preview:input -- <fixtur
 
 Use `npm.cmd run preview:rooms -- <fixture-name>` for actual local room screening. The report includes sorted eligible room IDs and physical/booking rejection reasons while retaining fixture mode and pending validation. Tests compare those IDs with the hand-written direct-room expectations: HALL_A for `direct-room`, LAB_BACKUP for `equipment-failure`, and none for the other two cases. An empty list does not prove that no relocation or broader recovery exists. No moves or bookings are produced.
 
-`POST /allocation/candidates` now generates direct target-only move proposals using these facts. Use the fixture's `request` as the JSON body, as shown in the [service API guide](../README.md). Candidates are computed from the inputs, never copied from `expected`; they remain fixture/pending and cause no booking changes. The target's current room is excluded from direct destinations. The direct-room and equipment-failure cases produce one proposal each; the other cases produce a complete empty direct-search result. Relocation and scoring are not implemented.
+`POST /allocation/candidates` generates direct target-only moves. `POST /allocation/room-swaps` generates single-displacement plans, with both moves together. Use the fixture's `request` as JSON, as shown in the [service API guide](../README.md). Proposals are computed from the inputs, never copied from `expected`; they remain fixture/pending and cause no booking changes. Direct-room and equipment-failure each produce one direct proposal. Single-relocation and single-swap produce a two-move proposal from the swap endpoint. Scoring and authoritative validation are not implemented.
+
+In `single-swap`, S007's original room is ROOM_C rather than null. The copied final assignment first removes both originals, then checks S001 in ROOM_C and S007 in HALL_A. This is a literal two-way exchange, unlike freeing a hall for an unassigned target. Each lecture keeps its own time interval and requirements; a zero move allowance prevents either plan. The original relocation fixture and shared samples are unchanged.
 
 ## The relocation example
 
@@ -42,7 +45,7 @@ This fixture makes the existing [proposed interface](../../../docs/04-service-in
 - `request.allowedMoveCount` limits displaced existing sessions, excluding the target. The returned move list still includes the target.
 - `expected` contains hand-written acceptance data, not output from an implemented optimizer. The proposal stays `pending`; a fixture check cannot establish authoritative validity.
 
-Restrictions in the other examples use `restrictionId`, `roomId`, `kind`, dated `startAt`/`endAt`, `unavailableFacilities`, nullable `usableComputers` and a reason. A working-computer restriction is an effective count cap, not a number to subtract. In the equipment-failure snapshot, LAB_A already has 40 usable computers after the fault; the room check keeps the effective count at 40. LAB_BACKUP is an additional fictional room, not a change to the shared facilities sample. The no-solution example closes ROOM_C for the full interval. Local direct-room checks are implemented; relocation proposals and whole-plan validation remain outside these checks.
+Restrictions in the other examples use `restrictionId`, `roomId`, `kind`, dated `startAt`/`endAt`, `unavailableFacilities`, nullable `usableComputers` and a reason. A working-computer restriction is an effective count cap, not a number to subtract. In the equipment-failure snapshot, LAB_A already has 40 usable computers after the fault; the room check keeps the effective count at 40. LAB_BACKUP is an additional fictional room, not a change to the shared facilities sample. The no-solution example closes ROOM_C for the full interval. Local direct-room and single-displacement proposals are implemented; whole-plan Platform validation remains pending.
 
 ## Reproduce the checks
 

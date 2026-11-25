@@ -6,9 +6,9 @@ const {
   createFixtureClients,
 } = require('../clients/fixture-clients');
 
-test('the fixture allowlist provides four explicitly fictional scenarios', () => {
+test('the fixture allowlist provides five explicitly fictional scenarios', () => {
   assert.deepEqual([...FIXTURE_NAMES].sort(), [
-    'direct-room', 'equipment-failure', 'no-solution', 'single-relocation',
+    'direct-room', 'equipment-failure', 'no-solution', 'single-relocation', 'single-swap',
   ]);
   for (const name of FIXTURE_NAMES) {
     const fixture = loadFixture(name);

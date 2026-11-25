@@ -5,7 +5,7 @@ const {
 } = require('../validation/allocation-input');
 
 const FIXTURE_NAMES = Object.freeze([
-  'single-relocation', 'direct-room', 'equipment-failure', 'no-solution',
+  'single-relocation', 'single-swap', 'direct-room', 'equipment-failure', 'no-solution',
 ]);
 
 function loadFixture(name) {
