@@ -46,4 +46,4 @@ function parseScoreRequest(value) {
   return result.data;
 }
 
-module.exports = { ScoreRequestSchema, parseScoreRequest };
+module.exports = { MoveSchema, ScoreRequestSchema, parseScoreRequest };

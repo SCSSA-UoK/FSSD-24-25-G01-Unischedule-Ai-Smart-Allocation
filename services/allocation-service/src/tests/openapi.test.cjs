@@ -7,6 +7,7 @@ const httpRequest = require('supertest');
 const { createApp } = require('../app');
 const { FIXTURE_NAMES, loadFixture, createFixtureClients } = require('../clients/fixture-clients');
 const { parseCandidateRequest } = require('../validation/allocation-input');
+const { createCandidateId } = require('../algorithms/candidate-id');
 
 const contractPath = path.resolve(__dirname, '../../../../contracts/openapi/allocation.openapi.yaml');
 const contract = YAML.parse(fs.readFileSync(contractPath, 'utf8'));
@@ -52,23 +53,42 @@ function checkObjectFields(value, schema) {
   }
 }
 
-test('draft OpenAPI identifies health, both candidate searches and explained scoring as implemented', () => {
+function fixtureValidator(proposals = []) {
+  return {
+    source: 'fixture',
+    async validateProposal(proposal) {
+      proposals.push(structuredClone(proposal));
+      return {
+        ...proposal,
+        validationStatus: 'valid',
+        validationReference: 'fixture-validation-001',
+        validatedAt: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
+        conflicts: [],
+      };
+    },
+  };
+}
+
+test('draft OpenAPI identifies the implemented routes without claiming a live Platform peer', () => {
   assert.equal(contract.openapi, '3.1.0');
-  assert.equal(contract.info.version, '0.5.0');
+  assert.equal(contract.info.version, '0.6.0');
   assert.equal(contract.servers[0].url, 'http://localhost:4001');
   assert.deepEqual(Object.keys(contract.paths).sort(), [
-    '/allocation/candidates', '/allocation/room-swaps', '/allocation/score', '/health',
+    '/allocation/candidates', '/allocation/room-swaps', '/allocation/score', '/allocation/validate', '/health',
   ]);
   assert.equal(contract.paths['/health'].get['x-implementation-status'], 'implemented');
   assert.equal(contract.paths['/allocation/candidates'].post['x-implementation-status'], 'implemented');
   assert.equal(contract.paths['/allocation/room-swaps'].post['x-implementation-status'], 'implemented');
   assert.equal(contract.paths['/allocation/score'].post['x-implementation-status'], 'implemented');
+  assert.equal(contract.paths['/allocation/validate'].post['x-implementation-status'], 'implemented');
+  assert.equal(contract.paths['/allocation/validate'].post['x-peer-contract-status'], 'proposed');
   for (const route of ['/allocation/candidates', '/allocation/room-swaps', '/allocation/score']) {
     const responses = contract.paths[route].post.responses;
     for (const status of ['200', '400', '404', '409', '413', '415', '422', '503', '504', '500']) {
       assert.ok(responses[status], `Missing documented ${route} response: ${status}`);
     }
   }
+  assert.ok(contract.paths['/allocation/validate'].post.responses['502']);
   assert.ok(Object.keys(contract.paths).every((route) => !/apply|bookings/i.test(route)));
 });
 
@@ -436,4 +456,93 @@ test('empty score batches still check versions and invalid plans reject without 
   assert.equal(rejected.body.code, 'INVALID_CANDIDATE');
   assert.equal(rejected.body.rankedCandidates, undefined);
   assert.equal(rejected.body.traceId, rejected.headers['x-request-id']);
+});
+
+test('validation has the documented stricter batch bound and is unavailable by default', async () => {
+  const operation = contract.paths['/allocation/validate'].post;
+  const requestSchema = resolveReference(operation.requestBody.content['application/json'].schema.$ref);
+  assert.equal(requestSchema.additionalProperties, false);
+  assert.deepEqual(requestSchema.required, contract.components.schemas.ScoreRequest.required);
+  assert.equal(requestSchema.properties.candidates.minItems, 0);
+  assert.equal(requestSchema.properties.candidates.maxItems, 10);
+  assert.equal(contract.components.schemas.ScoreRequest.properties.candidates.maxItems, 50);
+  const example = operation.requestBody.content['application/json'].example;
+  checkObjectFields(example, requestSchema);
+  const response = await httpRequest(createApp()).post('/allocation/validate').send(example).expect(503);
+  checkObjectFields(response.body, contract.components.schemas.Error);
+  assert.equal(response.body.code, 'PLATFORM_VALIDATION_UNAVAILABLE');
+  assert.equal(response.body.traceId, response.headers['x-request-id']);
+  assert.equal(response.body.validatedCandidates, undefined);
+});
+
+test('explicit fixture validation matches evidence fields but cannot produce an authoritative valid candidate', async () => {
+  const operation = contract.paths['/allocation/validate'].post;
+  const example = operation.requestBody.content['application/json'].example;
+  const responseSchema = resolveReference(operation.responses['200'].content['application/json'].schema.$ref);
+  const assessedSchema = resolveReference(responseSchema.properties.rankedCandidates.items.$ref);
+  const evidenceSchema = resolveReference(assessedSchema.properties.validationEvidence.$ref);
+  const proposals = [];
+  const app = createApp({ validationClient: fixtureValidator(proposals) });
+  const response = await httpRequest(app).post('/allocation/validate').send(example).expect(200);
+  const result = response.body;
+  checkObjectFields(result, responseSchema);
+  for (const field of ['mode', 'scope', 'validationStatus', 'validationSource']) {
+    assert.equal(result[field], responseSchema.properties[field].const);
+  }
+  assert.deepEqual(result.validatedCandidates, responseSchema.properties.validatedCandidates.const);
+  assert.deepEqual(result.validatedCandidates, []);
+  assert.equal(result.rankedCandidates.length, 1);
+  assert.ok(!assessedSchema.properties.validationStatus.enum.includes('valid'));
+  const [candidate] = result.rankedCandidates;
+  checkObjectFields(candidate, assessedSchema);
+  assert.equal(candidate.validationStatus, 'pending');
+  assert.equal(candidate.cost, 2);
+  assert.equal(candidate.candidateId, example.candidates[0].candidateId);
+  assert.deepEqual(candidate.moves, example.candidates[0].moves);
+  checkObjectFields(candidate.validationEvidence, evidenceSchema);
+  assert.equal(candidate.validationEvidence.source, 'fixture');
+  assert.equal(candidate.validationEvidence.reportedStatus, 'valid');
+  assert.equal(candidate.validationEvidence.validationReference, 'fixture-validation-001');
+  assert.ok(Number.isFinite(Date.parse(candidate.validationEvidence.validatedAt)));
+  assert.equal(candidate.validationEvidence.scenarioRevision, example.scenarioRevision);
+  assert.equal(candidate.validationEvidence.facilitiesVersion, example.facilitiesVersion);
+  assert.deepEqual(candidate.validationEvidence.conflicts, []);
+  assert.deepEqual(proposals, [{
+    scenarioId: example.scenarioId,
+    scenarioRevision: example.scenarioRevision,
+    facilitiesVersion: example.facilitiesVersion,
+    candidateId: example.candidates[0].candidateId,
+    moves: example.candidates[0].moves,
+  }]);
+});
+
+test('validation accepts ten explicit plans and rejects eleven before invoking the fixture validator', async () => {
+  const fixture = loadFixture('direct-room');
+  const target = fixture.sessions.find((session) => session.sessionId === fixture.request.affectedSessionId);
+  const candidates = Array.from({ length: 11 }, (_, index) => {
+    const roomId = `ROOM_CHECK_${index}`;
+    fixture.rooms.push({ roomId, seats: 80, features: ['projector'], usableComputers: 0, building: 'Main' });
+    const moves = [{
+      sessionId: target.sessionId, fromRoomId: target.roomId, toRoomId: roomId,
+      startAt: target.startAt, endAt: target.endAt,
+    }];
+    return { candidateId: createCandidateId({ snapshot: fixture }, moves), moves };
+  });
+  const proposals = [];
+  const app = createApp({
+    clients: createFixtureClients({ fixture }), validationClient: fixtureValidator(proposals),
+  });
+  const body = {
+    scenarioId: fixture.scenarioId, scenarioRevision: fixture.scenarioRevision,
+    facilitiesVersion: fixture.facilitiesVersion, affectedSessionId: target.sessionId,
+    allowedMoveCount: 0, candidates: candidates.slice(0, 10),
+  };
+  const accepted = await httpRequest(app).post('/allocation/validate').send(body).expect(200);
+  assert.equal(accepted.body.rankedCandidates.length, 10);
+  assert.deepEqual(accepted.body.validatedCandidates, []);
+  assert.ok(accepted.body.rankedCandidates.every((candidate) => candidate.validationStatus === 'pending'));
+  assert.equal(proposals.length, 10);
+  const rejected = await httpRequest(app).post('/allocation/validate').send({ ...body, candidates }).expect(422);
+  assert.equal(rejected.body.code, 'INVALID_INPUT');
+  assert.equal(proposals.length, 10);
 });

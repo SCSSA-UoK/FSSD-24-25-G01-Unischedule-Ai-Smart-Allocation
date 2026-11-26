@@ -1,12 +1,15 @@
 openapi: 3.1.0
 info:
   title: Allocation service contract
-  version: 0.5.0
+  version: 0.6.0
   description: >-
     Draft for team review. Health, direct candidates, single-displacement room
     swaps and explained fixed scoring are implemented with fictional snapshots.
-    Authentication, live backend integration and storage are not implemented.
-    Every proposal remains pending. Allocation never writes bookings.
+    A guarded validation adapter is implemented, but the proposed Platform peer
+    endpoint and live input contract are absent. Default validation is unavailable;
+    explicit fixture tests cannot create authoritative valid results. Authentication
+    on Allocation, live integration and storage remain unimplemented. Generation
+    and scoring stay pending. Allocation never writes bookings.
 servers:
   - url: http://localhost:4001
 paths:
@@ -178,6 +181,69 @@ paths:
         '503': { $ref: '#/components/responses/ErrorResponse' }
         '504': { $ref: '#/components/responses/ErrorResponse' }
         '500': { $ref: '#/components/responses/ErrorResponse' }
+  /allocation/validate:
+    post:
+      operationId: validateAllocationCandidates
+      x-implementation-status: implemented
+      x-peer-contract-status: proposed
+      description: >-
+        Guarded whole-plan validation adapter accepting the scoring request shape
+        with at most 10 plans. Requires JSON and a configured validator. The default
+        returns 503 PLATFORM_VALIDATION_UNAVAILABLE. Current inputs are fixture-only;
+        a configured real HTTP validator returns 503 LIVE_INPUTS_REQUIRED without
+        sending fictional scenario IDs. Only an explicit injected fixture/mock
+        validator can produce a success response for adapter tests. Its reported
+        valid maps to pending; invalid and stale are retained as assessments, not
+        recommendations. validatedCandidates is always empty. Evidence must match
+        the whole proposal; identity/move mismatches or inconsistent results return
+        502 PLATFORM_INVALID_RESPONSE. Evidence older than 60 seconds, over 5 seconds
+        in the future, or with mismatched versions is stale. Source versions are
+        reread after the batch; changes reject with 409 rather than returning partial
+        results. Batch deadline exhaustion returns 504. Costs retain their order and
+        never establish validity or approval. No booking writes or Allocation route
+        authentication are implemented. Proposed peer POST /api/scenarios/{scenarioId}/validate
+        and bearer-token authentication await Member 1 agreement; no live compatibility
+        is claimed. PLATFORM_VALIDATION_BASE_URL, PLATFORM_VALIDATION_TOKEN and timeout
+        configuration are server-side settings, never request fields.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ValidateRequest' }
+            example:
+              scenarioId: scenario-direct-001
+              scenarioRevision: 3
+              facilitiesVersion: fixture-v1
+              affectedSessionId: S007
+              allowedMoveCount: 0
+              candidates:
+                - candidateId: candidate-c92b306670b917673d908850
+                  moves:
+                    - sessionId: S007
+                      fromRoomId: null
+                      toRoomId: HALL_A
+                      startAt: '2026-11-16T09:00:00+05:30'
+                      endAt: '2026-11-16T11:00:00+05:30'
+      responses:
+        '200':
+          description: >-
+            Explicit fixture-validator assessments only, retaining score order.
+            No candidate is authoritative valid; none enters validatedCandidates.
+          headers:
+            X-Request-Id: { $ref: '#/components/headers/RequestId' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ValidateResponse' }
+        '400': { $ref: '#/components/responses/ErrorResponse' }
+        '404': { $ref: '#/components/responses/ErrorResponse' }
+        '409': { $ref: '#/components/responses/ErrorResponse' }
+        '413': { $ref: '#/components/responses/ErrorResponse' }
+        '415': { $ref: '#/components/responses/ErrorResponse' }
+        '422': { $ref: '#/components/responses/ErrorResponse' }
+        '502': { $ref: '#/components/responses/ErrorResponse' }
+        '503': { $ref: '#/components/responses/ErrorResponse' }
+        '504': { $ref: '#/components/responses/ErrorResponse' }
+        '500': { $ref: '#/components/responses/ErrorResponse' }
 components:
   headers:
     RequestId:
@@ -189,7 +255,8 @@ components:
         Flat JSON error. 400 malformed JSON; 404 missing route or ID; 409 stale
         scenario or facilities version; 413 body over 100kb; 415 unsupported body
         encoding or non-JSON request (UNSUPPORTED_MEDIA_TYPE); 422 invalid input,
-        requirements or submitted candidate; 503 failed dependency read; 504 dependency read timeout;
+        requirements or submitted candidate; 502 malformed or contradictory Platform
+        evidence; 503 failed dependency read or unavailable validation; 504 dependency/batch timeout;
         500 unexpected failure. Input preparation waits at most 5000ms by default,
         independently of the search-loop budget. Unexpected messages stay generic.
       headers:
@@ -518,6 +585,115 @@ components:
           maxItems: 50
           items: { $ref: '#/components/schemas/RankedCandidate' }
         reasons: { type: array, items: { type: string } }
+    ValidateRequest:
+      type: object
+      additionalProperties: false
+      description: Same strict submitted-plan context as scoring, bounded to 10 candidates.
+      required: [scenarioId, scenarioRevision, facilitiesVersion, affectedSessionId, allowedMoveCount, candidates]
+      properties:
+        scenarioId: { $ref: '#/components/schemas/Id' }
+        scenarioRevision: { type: integer, minimum: 0, maximum: 9007199254740991 }
+        facilitiesVersion: { $ref: '#/components/schemas/Id' }
+        affectedSessionId: { $ref: '#/components/schemas/Id' }
+        allowedMoveCount: { type: integer, minimum: 0, maximum: 3 }
+        candidates:
+          type: array
+          minItems: 0
+          maxItems: 10
+          items: { $ref: '#/components/schemas/SubmittedCandidate' }
+    ValidationConflict:
+      type: object
+      additionalProperties: false
+      required: [code, message, sessionIds]
+      properties:
+        code: { $ref: '#/components/schemas/Id' }
+        message: { type: string, minLength: 1, maxLength: 500, pattern: '\S' }
+        sessionIds:
+          type: array
+          maxItems: 20
+          items: { $ref: '#/components/schemas/Id' }
+    PlatformValidationResult:
+      type: object
+      additionalProperties: false
+      x-implementation-status: proposed-peer-contract
+      description: >-
+        Proposed Member 1 peer response, not an implemented Platform endpoint.
+        Echoes the complete request proposal and binds evidence to its exact
+        identity and moves. valid requires no conflicts; invalid requires at
+        least one conflict. validatedAt is a dated whole-second timestamp with an
+        explicit offset. The adapter checks freshness
+        and versions separately. Fixture/mock responses prove adapter behavior only.
+      required: [scenarioId, scenarioRevision, facilitiesVersion, candidateId, moves, validationStatus, validationReference, validatedAt, conflicts]
+      properties:
+        scenarioId: { $ref: '#/components/schemas/Id' }
+        scenarioRevision: { type: integer, minimum: 0, maximum: 9007199254740991 }
+        facilitiesVersion: { $ref: '#/components/schemas/Id' }
+        candidateId: { $ref: '#/components/schemas/Id' }
+        moves:
+          type: array
+          minItems: 1
+          maxItems: 2
+          items: { $ref: '#/components/schemas/Move' }
+        validationStatus: { type: string, enum: [valid, invalid, stale] }
+        validationReference: { $ref: '#/components/schemas/Id' }
+        validatedAt: { $ref: '#/components/schemas/OffsetDateTime' }
+        conflicts:
+          type: array
+          maxItems: 100
+          items: { $ref: '#/components/schemas/ValidationConflict' }
+    ValidationEvidence:
+      type: object
+      additionalProperties: false
+      required: [source, reportedStatus, validationReference, validatedAt, scenarioRevision, facilitiesVersion, conflicts]
+      properties:
+        source: { type: string, const: fixture }
+        reportedStatus: { type: string, enum: [valid, invalid, stale] }
+        validationReference: { $ref: '#/components/schemas/Id' }
+        validatedAt: { $ref: '#/components/schemas/OffsetDateTime' }
+        scenarioRevision: { type: integer, minimum: 0, maximum: 9007199254740991 }
+        facilitiesVersion: { $ref: '#/components/schemas/Id' }
+        conflicts:
+          type: array
+          maxItems: 100
+          items: { $ref: '#/components/schemas/ValidationConflict' }
+    AssessedCandidate:
+      type: object
+      additionalProperties: false
+      required: [candidateId, rank, kind, validationStatus, moves, cost, costBreakdown, reasons, validationEvidence]
+      properties:
+        candidateId: { $ref: '#/components/schemas/Id' }
+        rank: { type: integer, minimum: 1, maximum: 10 }
+        kind: { type: string, enum: [direct, relocation, swap] }
+        validationStatus: { type: string, enum: [pending, invalid, stale] }
+        moves:
+          type: array
+          minItems: 1
+          maxItems: 2
+          items: { $ref: '#/components/schemas/Move' }
+        cost: { type: number, minimum: 0 }
+        costBreakdown: { $ref: '#/components/schemas/CostBreakdown' }
+        reasons: { type: array, items: { type: string } }
+        validationEvidence: { $ref: '#/components/schemas/ValidationEvidence' }
+    ValidateResponse:
+      type: object
+      additionalProperties: false
+      required: [runId, mode, scope, validationStatus, scenarioId, scenarioRevision, facilitiesVersion, scoringPolicy, rankedCandidates, reasons, validationSource, validatedCandidates]
+      properties:
+        runId: { $ref: '#/components/schemas/Id' }
+        mode: { type: string, const: fixture }
+        scope: { type: string, const: platform-validation }
+        validationStatus: { type: string, const: pending }
+        scenarioId: { $ref: '#/components/schemas/Id' }
+        scenarioRevision: { type: integer, minimum: 0, maximum: 9007199254740991 }
+        facilitiesVersion: { $ref: '#/components/schemas/Id' }
+        scoringPolicy: { $ref: '#/components/schemas/ScoringPolicy' }
+        rankedCandidates:
+          type: array
+          maxItems: 10
+          items: { $ref: '#/components/schemas/AssessedCandidate' }
+        reasons: { type: array, items: { type: string } }
+        validationSource: { type: string, const: fixture }
+        validatedCandidates: { type: array, const: [], maxItems: 0 }
     Error:
       type: object
       additionalProperties: false

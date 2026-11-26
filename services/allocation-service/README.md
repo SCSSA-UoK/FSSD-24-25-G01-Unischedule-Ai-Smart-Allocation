@@ -8,6 +8,8 @@ This service recommends rooms and recovery arrangements. It searches empty rooms
 
 **Available now:** an Express service with `GET /health`, direct search at `POST /allocation/candidates`, single-displacement search at `POST /allocation/room-swaps`, and explained cost ranking at `POST /allocation/score`. [Five fictional fixtures](fixtures/README.md) support independent testing. Direct candidates move only the target; relocation/swap candidates contain both the target and one other lecture's move, preserving each session's original time. All remain fixture/pending. Longer move chains, live integration, authentication, persistence and allocation UI pages remain **planned**.
 
+The Platform validation transport and guarded `POST /allocation/validate` boundary are implemented. Authoritative validation is **not integrated**: the current Platform has no compatible versioned snapshot/validation API or service authentication, and allocation inputs remain fixture-only. The default validation response is an explicit 503. Mock evidence can be exercised through test injection and never creates an authoritative recommendation.
+
 `GET /health` returns `200` with `{"status":"ok","service":"allocation-service"}`. This is a liveness check: it does not connect to or report readiness for MongoDB, Platform or Facilities. Each response has a generated `X-Request-Id`; errors include the same value as `traceId`. Unknown routes return a JSON `404`, malformed JSON returns `400`, JSON bodies over 100kb return `413`, and unsupported body encodings return `415`. Unexpected failures return a generic `500` without internal error details.
 
 Read [team ownership](../../docs/01-team-ownership.md), [service interfaces](../../docs/04-service-interfaces.md), and [OpenAPI guidance](../../contracts/openapi/README.md). These preserve the original service handover references.
@@ -170,6 +172,7 @@ The [OpenAPI contract](../../contracts/openapi/allocation.openapi.yaml) document
 | POST `/allocation/candidates` | Direct room changes from the fixture catalog | Implemented, 200 |
 | POST `/allocation/room-swaps` | One displaced lecture, including a two-way room exchange | Implemented, 200 |
 | POST `/allocation/score` | Recheck submitted plans and rank by explained fixed costs | Implemented, 200 |
+| POST `/allocation/validate` | Whole-plan validation boundary with evidence/freshness checks | Implemented guard; default 503, live integration pending |
 | GET `/allocation/results/{runId}` | Stored run lookup | Planned |
 | GET `/allocation/analytics?from=...&to=...` | Benchmark summaries | Planned |
 
@@ -254,11 +257,27 @@ The response identifies the snapshot and policy, has `scope: "submitted-candidat
 
 All results stay `mode: "fixture"` and `validationStatus: "pending"`. Ranking covers only the submitted alternatives, so it cannot establish a global optimum or recover candidates omitted by a truncated search. Empty lists return an empty ranking after input and version checks. Scoring does not search, store runs, validate lecturer/group conflicts or apply timetable changes. Generation endpoint shapes and their room-ID ordering are unchanged.
 
+### Platform validation adapter
+
+`POST /allocation/validate` accepts the scoring request shape with at most **10** candidates. It performs the same source, identity and local final-room checks before submitting any plan. Missing validation configuration returns `503 PLATFORM_VALIDATION_UNAVAILABLE`, including for an empty batch. A configured HTTP validator with the current fixture-only inputs returns `503 LIVE_INPUTS_REQUIRED` before any validation network call. Generation and scoring remain usable independently.
+
+The standalone `PlatformValidationClient` implements a **proposed peer contract**, awaiting agreement with Member 1. It submits one complete proposal per request to `POST /api/scenarios/{scenarioId}/validate`; a relocation's two moves are sent together. The JSON body contains `scenarioId`, `scenarioRevision`, `facilitiesVersion`, `candidateId` and the canonical `moves`. Its fixed configured origin and Bearer service token come from server configuration. Callers cannot supply a URL, token or evidence through the allocation request. The client exposes only validation; it does not call simulation moves, apply or timetable-write endpoints.
+
+An HTTP 200 JSON response must echo the exact scenario, candidate and complete moves, plus the revision and facilities version actually checked. It must include a bounded `validationReference`, offset timestamp `validatedAt`, `validationStatus` (`valid`, `invalid` or `stale`) and a `conflicts` array. Each conflict contains `code`, `message` and `sessionIds`; room, lecturer and student-group conflicts must come from Platform. A valid response must have no conflicts; an invalid response must identify at least one. Missing fields, crossed identities, altered moves or contradictory status/conflicts produce `502 PLATFORM_INVALID_RESPONSE`. Hashes identify proposal content and do not replace authoritative checks.
+
+In the injected fixture workflow, version mismatches, evidence older than 60 seconds, or evidence over five seconds in the future mark that candidate stale. The boundary rereads both snapshots and reruns local checks after receiving all evidence. A changed revision or facilities version rejects the batch with 409; newly invalid local facts also reject it. Validation is bounded by a five-second batch deadline by default; failed batches return an error without partial results. The HTTP adapter separately bounds connection and JSON-body reads, rejects redirects and does not retry.
+
+Test-only fixture validators return `validationSource: "fixture"` and per-candidate `validationEvidence` with the source, reported status, reference, timestamp, versions and conflicts. A reported valid mock result maps to `pending`; invalid and stale results remain excluded from recommendations. Every response is still fixture/pending overall, and `validatedCandidates` is always empty. `rankedCandidates` retains cost order for inspection; its rank does not imply approval. No public option enables mock success or authoritative validity.
+
+The HTTP client maps credential rejection (401/403), missing endpoints (404/501), connection failures and other unsuccessful responses to sanitized 503 errors; upstream 409 becomes a stale-scenario 409 and deadline expiry becomes 504. Upstream response bodies, connection details and tokens are not reflected in errors.
+
+Before enabling genuine validation, Member 1 must provide dated, versioned requirements and a whole-plan validation endpoint that checks room, lecturer and group constraints and records consumed facilities freshness. Agree on service credentials and the response contract, integrate genuinely live Platform/Facilities input adapters, and test against the real services. The existing `/api/simulations/{id}/preview` explicitly says that conflicts and lecturer availability are not validated; it cannot supply that evidence.
+
 ## 9. Integration and Agentic AI usage
 
 1. Call proposed platform `GET /api/scenarios/{scenarioId}/sessions` for dated sessions, constraints and revision.
 2. Call Facilities `GET /facilities/rooms`, `GET /facilities/restrictions` and `POST /facilities/rooms/suitability` for physical facts.
-3. Submit `{scenarioRevision, candidateId, moves}` to proposed `POST /api/scenarios/{scenarioId}/validate`. Agree with Member 1 on a response carrying revision, validation reference and conflicts.
+3. Use the contract-tested validation transport to submit the complete `{scenarioId, scenarioRevision, facilitiesVersion, candidateId, moves}` proposal to proposed `POST /api/scenarios/{scenarioId}/validate` once genuine live inputs and the peer API are available. Agree with Member 1 on authentication, consumed versions, validation reference, timestamp and conflicts.
 4. Expose bounded deterministic search/score tools to the Agent. The LLM can request and explain options but cannot declare validity or call an apply tool.
 5. The Agent owns `recoveryPlanId`, linking it to Allocation's `candidateId`. Operations owns approval. Spring Boot alone owns application.
 
@@ -340,6 +359,9 @@ MongoDB is not required for the implemented HTTP endpoints. When persistence is 
 |---|---|
 | `ALLOCATION_PORT=4001` | Implemented; defaults to 4001 |
 | `PROJECT_TIMEZONE=Asia/Colombo` | Implemented; defaults to Asia/Colombo |
+| `PLATFORM_VALIDATION_BASE_URL` | Optional validation HTTP origin; unset by default. HTTPS required except localhost/loopback HTTP. No subpath, userinfo, query or fragment |
+| `PLATFORM_VALIDATION_TOKEN` | Server-only Bearer service token required when a validation origin is configured; actual credentials/auth agreement pending |
+| `PLATFORM_VALIDATION_TIMEOUT_MS=5000` | Validation HTTP deadline, integer 1-10000; includes response-body reading |
 | `MONGODB_URI` | Existing key; unused by the HTTP scaffold; select `allocation_db` when implementing persistence |
 | `FACILITIES_PORT=4002` | Existing key; reserved for facilities integration |
 | `PLATFORM_BASE_URL=http://localhost:8081` | Proposed new root key matching current Java configuration; confirm first |
@@ -349,9 +371,13 @@ MongoDB is not required for the implemented HTTP endpoints. When persistence is 
 
 The template's `SPRING_PORT=8080` does not override the current hardcoded Java port. Container URLs will differ from localhost when application containers are introduced. Keep `.env` untracked; never expose secrets via `NEXT_PUBLIC_*`.
 
+Validation settings are read after the root environment loader, with the same shell precedence. An invalid configured URL, missing token or invalid deadline stops startup with a value-free configuration error. Leave the origin unset until the peer contract and live input adapters are ready. Configuring an origin alone cannot validate fixture data.
+
 ## 12. Dummy-data workflow and testing
 
 Run `npm.cmd test` from the service directory. Checks cover HTTP/configuration, strict inputs, normalization, fixture isolation, revisions/references, preview commands, OpenAPI, room checks, candidate generation and scoring. Direct tests cover target-only moves and zero displacement. Swap tests cover both moves together, actual room exchanges, multiple blockers, the displaced session's full interval/requirements, hidden occupancy in the target's former room, partial closures/outages and copied final assignments. Both cover stable IDs/order, exact/overflow limits, deterministic time budgets, sanitized dependency failures and unchanged sources. Scoring checks cover component costs, stable ties, version/source consistency, invalid complete plans, strict caller fields and pending-only results. Environment tests use temporary files instead of private root configuration. Live integration is not implemented.
+
+Validation tests use explicit fixture injection or local ephemeral HTTP servers. They verify whole-plan transport, Bearer headers, identity-bound evidence, stale revisions/facilities/timestamps, lecturer/group conflict responses, malformed/contradictory evidence, post-validation freshness reads, cancellation, header/body deadlines, redirects and sanitized failures. These are adapter contract tests and do not establish a successful connection to the real Spring Boot validator.
 
 `prepareAllocationInput(request, { platformClient, facilitiesClient })` validates the request before reading the two clients, combines their snapshots and rejects mismatched scenarios/revisions, missing sessions and invalid room references. Fixture clients implement `getScenarioSnapshot(scenarioId)` and `getRoomSnapshot()`, return fresh copies and expose no mutation methods. Dependency failures propagate; no successful candidate or validity is invented.
 
@@ -405,6 +431,8 @@ Demonstrate the 100-seat case: direct search fails, relocation succeeds, both mo
 - [ ] Suitability, swaps and bounded multi-step algorithms are tested.
 - [ ] Alternative slots preserve duration and respect availability.
 - [x] Fixed-policy costs and component explanations are reproducible with fixture plans.
+- [x] Validation transport and guarded evidence handling are contract-tested without timetable writes.
+- [ ] Real Platform validation and live versioned inputs are integrated with agreed service authentication.
 - [ ] Candidates record IDs, revision, facilities freshness and validation evidence.
 - [ ] Search, comparison, visualization and analytics pages handle errors/empty results.
 - [ ] Owned collections and root environment loading work independently.

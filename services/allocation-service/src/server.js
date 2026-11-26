@@ -1,9 +1,11 @@
 const { createApp } = require('./app');
 const { loadConfig } = require('./config/env');
+const { createValidationClientFromEnv } = require('./clients/platform-validation-client');
 
 function startServer() {
   const config = loadConfig();
-  const server = createApp().listen(config.port);
+  const validationClient = createValidationClientFromEnv();
+  const server = createApp({ validationClient }).listen(config.port);
   server.once('listening', () => {
     console.log(`Allocation service listening on port ${config.port}. Fixture data mode.`);
   });
