@@ -3,6 +3,8 @@ const { AllocationInputError, parseCandidateRequest } = require('../validation/a
 const { resolveFixtureClients } = require('../clients/scenario-fixture-clients');
 const { generateDirectCandidates } = require('../services/generate-direct-candidates');
 const { generateRoomSwaps } = require('../services/generate-room-swaps');
+const { parseScoreRequest } = require('../validation/scoring-input');
+const { scoreCandidates } = require('../services/score-candidates');
 
 function createCandidateRouter({ clients, searchOptions } = {}) {
   const router = express.Router();
@@ -21,6 +23,14 @@ function createCandidateRouter({ clients, searchOptions } = {}) {
     const input = parseCandidateRequest(request.body);
     const selectedClients = clients === undefined ? resolveFixtureClients(input.scenarioId) : clients;
     response.json(await generateRoomSwaps(input, selectedClients, searchOptions));
+  });
+  router.post('/allocation/score', async (request, response) => {
+    if (!request.is('application/json')) {
+      throw new AllocationInputError(415, 'UNSUPPORTED_MEDIA_TYPE', 'Send an application/json request body.');
+    }
+    const input = parseScoreRequest(request.body);
+    const selectedClients = clients === undefined ? resolveFixtureClients(input.scenarioId) : clients;
+    response.json(await scoreCandidates(input, selectedClients, searchOptions));
   });
   return router;
 }

@@ -222,12 +222,12 @@ test('a target already occupying the only feasible room does not receive a no-op
   assert.equal(response.body.truncated, false);
 });
 
-test('health remains available while unknown routes and the unimplemented score route remain 404', async () => {
+test('health remains available, unknown routes stay 404 and empty score input is rejected', async () => {
   const app = createApp();
   const health = await request(app).get('/health').expect(200);
   assert.deepEqual(health.body, { status: 'ok', service: 'allocation-service' });
   const unknown = await request(app).get('/allocation/unknown');
   assertError(unknown, 404, 'NOT_FOUND');
   const score = await request(app).post('/allocation/score').send({});
-  assertError(score, 404, 'NOT_FOUND');
+  assertError(score, 422, 'INVALID_INPUT');
 });

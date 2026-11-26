@@ -6,7 +6,7 @@
 
 This service recommends rooms and recovery arrangements. It searches empty rooms, explores moving existing lectures, and compares solutions. It must never update official or simulated timetable bookings. Spring Boot alone validates scheduling and applies administrator-approved simulation changes.
 
-**Available now:** an Express service with `GET /health`, direct search at `POST /allocation/candidates`, and single-displacement search at `POST /allocation/room-swaps`. [Five fictional fixtures](fixtures/README.md) support independent testing. Direct candidates move only the target; relocation/swap candidates contain both the target and one other lecture's move, preserving each session's original time. All remain fixture/pending. Ranking, longer move chains, live integration, authentication, persistence and allocation UI pages remain **planned**.
+**Available now:** an Express service with `GET /health`, direct search at `POST /allocation/candidates`, single-displacement search at `POST /allocation/room-swaps`, and explained cost ranking at `POST /allocation/score`. [Five fictional fixtures](fixtures/README.md) support independent testing. Direct candidates move only the target; relocation/swap candidates contain both the target and one other lecture's move, preserving each session's original time. All remain fixture/pending. Longer move chains, live integration, authentication, persistence and allocation UI pages remain **planned**.
 
 `GET /health` returns `200` with `{"status":"ok","service":"allocation-service"}`. This is a liveness check: it does not connect to or report readiness for MongoDB, Platform or Facilities. Each response has a generated `X-Request-Id`; errors include the same value as `traceId`. Unknown routes return a JSON `404`, malformed JSON returns `400`, JSON bodies over 100kb return `413`, and unsupported body encodings return `415`. Unexpected failures return a generic `500` without internal error details.
 
@@ -55,7 +55,7 @@ Never connect directly to another service's MongoDB database. A cached schedule 
 
 First reject hard failures: insufficient seats/equipment, closures and scheduling conflicts. A high score cannot cancel a hard failure.
 
-An illustrative seat-fit score is `100 * registeredStudents / seats`, calculated only for eligible rooms. It describes seat fit, not scheduling validity. A proposed candidate cost is:
+An illustrative seat-fit score is `100 * registeredStudents / seats`, calculated only for eligible rooms. That separate percentage is not emitted yet. The implemented fixed policy, `allocation-cost-v1`, uses:
 
 ```text
 cost = 100 * displacedExistingSessions
@@ -64,7 +64,9 @@ cost = 100 * displacedExistingSessions
      + totalUnusedSeats / 10
 ```
 
-Count each session once per applicable component. Exclude the target from `displacedExistingSessions`, but include its time/building changes where applicable. These weights are suggested settings, not university policy. Record a scoring version, show each component and use stable ID ordering for ties. Compare candidates validated against the same revision.
+Count each moved session once per applicable component. Exclude the target only from `displacedExistingSessions`; its building change counts when it has a known original room. An unassigned target has no known origin building and adds zero building changes. Unused seats are summed across the final destinations of moved sessions only. Current proposals preserve their original times, so `timeChangedSessions` is zero; the 200 weight is reserved for future time-search support and does not enable time changes.
+
+These fixed weights are an example policy, not university policy or configurable settings. Integer tenths are summed before converting to a decimal cost. Lower costs come first, with candidate ID order breaking ties. Each result includes counts, weighted contributions and the policy version. Fixture scoring compares only the submitted same-revision, same-facilities plans after local room checks. It keeps them pending; a validated recommendation list will require authoritative evidence from Platform.
 
 ## 4. Complete example: a lecture needs 100 seats
 
@@ -136,8 +138,8 @@ services/allocation-service/
     middleware/                # request IDs and error responses
     tests/                     # HTTP, environment and fixture checks
     controllers/               # placeholder
-    services/                  # shared input boundary, room inspection, direct and swap candidates
-    algorithms/                # intervals, room checks, candidate identity and final-assignment checks
+    services/                  # shared inputs, room inspection, candidate generation and scoring
+    algorithms/                # intervals, room checks, candidate identity, final assignments and costs
     clients/                   # read-only fixture clients and sample normalizers
     models/                    # placeholder
     validation/                # request, session, room and snapshot schemas
@@ -160,14 +162,14 @@ Use public IDs separately from MongoDB `_id`. Record scoring and facilities vers
 
 ## 8. REST API and JSON examples
 
-The [OpenAPI contract](../../contracts/openapi/allocation.openapi.yaml) documents the implemented fixture-only direct/swap endpoints and health route. Scoring and other routes remain proposals. The contract awaits team review and does not establish live upstream compatibility or implemented authentication.
+The [OpenAPI contract](../../contracts/openapi/allocation.openapi.yaml) documents the implemented fixture-only direct/swap/scoring endpoints and health route. Result lookup and analytics remain proposals. The contract awaits team review and does not establish live upstream compatibility or implemented authentication.
 
 | Method and path | Behavior | Status |
 |---|---|---|
 | GET `/health` | HTTP process liveness | Implemented |
 | POST `/allocation/candidates` | Direct room changes from the fixture catalog | Implemented, 200 |
 | POST `/allocation/room-swaps` | One displaced lecture, including a two-way room exchange | Implemented, 200 |
-| POST `/allocation/score` | Ranked costs | Planned |
+| POST `/allocation/score` | Recheck submitted plans and rank by explained fixed costs | Implemented, 200 |
 | GET `/allocation/results/{runId}` | Stored run lookup | Planned |
 | GET `/allocation/analytics?from=...&to=...` | Benchmark summaries | Planned |
 
@@ -223,7 +225,34 @@ The candidate has `kind: "relocation"`, `displacedExistingSessions: 1` and pendi
 
 Both original assignments are removed from a copied schedule before either final assignment is checked. The displaced lecture's own enrollment, equipment and full original interval are used, including portions before or after the target's interval. Each moved session must pass room checks against every remaining booking and the other proposed assignment. This allows a room freed by the target to be used safely while rejecting hidden occupants, partial closures and equipment outages. The original snapshot is unchanged, and a partial one-move plan is never returned.
 
-The response retains the common metadata but has `scope: "single-displacement"`. Its `roomChecks` describes original occupancy of processed prospective target rooms, not an approval of the complete plan. Candidate/time limits also apply inside the destination loop; truncation and dependency errors have the same meaning as direct search. No lecturer/group validation, ranking, time changes or longer chains are claimed. These are local room-check proposals pending authoritative Platform validation.
+The response retains the common metadata but has `scope: "single-displacement"`. Its `roomChecks` describes original occupancy of processed prospective target rooms, not an approval of the complete plan. Candidate/time limits also apply inside the destination loop; truncation and dependency errors have the same meaning as direct search. This generation endpoint returns no ranking; submit selected plans to `/allocation/score` to compare them. No lecturer/group validation, time changes or longer chains are claimed. These are local room-check proposals pending authoritative Platform validation.
+
+### Scoring submitted plans
+
+`POST /allocation/score` accepts a strict versioned context and up to 50 submitted plans, each containing only `candidateId` and one or two complete `moves`. Candidate storage is not implemented, so IDs alone cannot look up prior results. Project these fields from a generation response; omit generated reasons, status, kind and displacement summaries. Caller-supplied costs, policy weights and validation claims are rejected as unknown fields.
+
+```json
+{
+  "scenarioId": "scenario-relocation-001",
+  "scenarioRevision": 3,
+  "facilitiesVersion": "fixture-v1",
+  "affectedSessionId": "S007",
+  "allowedMoveCount": 1,
+  "candidates": [{
+    "candidateId": "candidate-f03c73559bc5028d739f70f5",
+    "moves": [
+      {"sessionId":"S001","fromRoomId":"HALL_A","toRoomId":"ROOM_C","startAt":"2026-11-16T09:00:00+05:30","endAt":"2026-11-16T11:00:00+05:30"},
+      {"sessionId":"S007","fromRoomId":null,"toRoomId":"HALL_A","startAt":"2026-11-16T09:00:00+05:30","endAt":"2026-11-16T11:00:00+05:30"}
+    ]
+  }]
+}
+```
+
+The service reads both source snapshots once, checks scenario and facilities versions, and recomputes candidate identity. IDs identify content; they are not signatures or proof of validity. Each plan must move the target exactly once, match all original source rooms and timestamp strings, change rooms, and respect the displacement allowance. A two-move plan must move the target hall's single original blocker. Local checks replay the complete final assignment, including each displaced lecture's own requirements and full interval. The request fails with 422 if any plan is invalid; no partial ranking is returned. Duplicate candidate/session IDs, malformed data and unknown fields also fail validation. A changed scenario or facilities version returns 409; read failures/timeouts retain 503/504.
+
+The response identifies the snapshot and policy, has `scope: "submitted-candidates"`, and returns `rankedCandidates` with one-based ranks, costs, component counts, weighted contributions, moves and explanations. The example costs **103**: one displaced lecture contributes 100 and `(50 - 40) + (80 - 60) = 30` unused seats contribute 3. Its time and building components are zero. A direct 60-student target moving to an 80-seat hall costs **2**. A literal cross-building exchange counts both moved lectures' building changes.
+
+All results stay `mode: "fixture"` and `validationStatus: "pending"`. Ranking covers only the submitted alternatives, so it cannot establish a global optimum or recover candidates omitted by a truncated search. Empty lists return an empty ranking after input and version checks. Scoring does not search, store runs, validate lecturer/group conflicts or apply timetable changes. Generation endpoint shapes and their room-ID ordering are unchanged.
 
 ## 9. Integration and Agentic AI usage
 
@@ -287,7 +316,18 @@ $swapBody = @{
   affectedSessionId = 'S007'
   allowedMoveCount = 1
 } | ConvertTo-Json
-Invoke-RestMethod -Method Post -Uri http://localhost:4001/allocation/room-swaps -ContentType 'application/json' -Body $swapBody
+$swapResult = Invoke-RestMethod -Method Post -Uri http://localhost:4001/allocation/room-swaps -ContentType 'application/json' -Body $swapBody
+$scoreBody = @{
+  scenarioId = $swapResult.scenarioId
+  scenarioRevision = $swapResult.scenarioRevision
+  facilitiesVersion = $swapResult.facilitiesVersion
+  affectedSessionId = 'S007'
+  allowedMoveCount = 1
+  candidates = @($swapResult.candidates | ForEach-Object {
+    @{ candidateId = $_.candidateId; moves = @($_.moves) }
+  })
+} | ConvertTo-Json -Depth 8
+Invoke-RestMethod -Method Post -Uri http://localhost:4001/allocation/score -ContentType 'application/json' -Body $scoreBody
 ```
 
 `src/app.js` constructs the Express app without listening or loading private configuration. `src/server.js` loads configuration and starts the listener. The HTTP service and tests run without MongoDB, Platform, Facilities or an LLM.
@@ -311,7 +351,7 @@ The template's `SPRING_PORT=8080` does not override the current hardcoded Java p
 
 ## 12. Dummy-data workflow and testing
 
-Run `npm.cmd test` from the service directory. Checks cover HTTP/configuration, strict inputs, normalization, fixture isolation, revisions/references, preview commands, OpenAPI, room checks and both candidate endpoints. Direct tests cover target-only moves and zero displacement. Swap tests cover both moves together, actual room exchanges, multiple blockers, the displaced session's full interval/requirements, hidden occupancy in the target's former room, partial closures/outages and copied final assignments. Both cover stable IDs/order, exact/overflow limits, deterministic time budgets, sanitized dependency failures and unchanged sources. Environment tests use temporary files instead of private root configuration. Live integration is not implemented.
+Run `npm.cmd test` from the service directory. Checks cover HTTP/configuration, strict inputs, normalization, fixture isolation, revisions/references, preview commands, OpenAPI, room checks, candidate generation and scoring. Direct tests cover target-only moves and zero displacement. Swap tests cover both moves together, actual room exchanges, multiple blockers, the displaced session's full interval/requirements, hidden occupancy in the target's former room, partial closures/outages and copied final assignments. Both cover stable IDs/order, exact/overflow limits, deterministic time budgets, sanitized dependency failures and unchanged sources. Scoring checks cover component costs, stable ties, version/source consistency, invalid complete plans, strict caller fields and pending-only results. Environment tests use temporary files instead of private root configuration. Live integration is not implemented.
 
 `prepareAllocationInput(request, { platformClient, facilitiesClient })` validates the request before reading the two clients, combines their snapshots and rejects mismatched scenarios/revisions, missing sessions and invalid room references. Fixture clients implement `getScenarioSnapshot(scenarioId)` and `getRoomSnapshot()`, return fresh copies and expose no mutation methods. Dependency failures propagate; no successful candidate or validity is invented.
 
@@ -364,7 +404,7 @@ Demonstrate the 100-seat case: direct search fails, relocation succeeds, both mo
 - [x] Single-displacement and two-way room-swap proposals pass local final-assignment checks with fixtures.
 - [ ] Suitability, swaps and bounded multi-step algorithms are tested.
 - [ ] Alternative slots preserve duration and respect availability.
-- [ ] Scores and cost components are reproducible.
+- [x] Fixed-policy costs and component explanations are reproducible with fixture plans.
 - [ ] Candidates record IDs, revision, facilities freshness and validation evidence.
 - [ ] Search, comparison, visualization and analytics pages handle errors/empty results.
 - [ ] Owned collections and root environment loading work independently.

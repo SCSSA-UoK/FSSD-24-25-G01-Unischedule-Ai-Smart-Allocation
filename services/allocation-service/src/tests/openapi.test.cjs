@@ -5,7 +5,7 @@ const path = require('node:path');
 const YAML = require('yaml');
 const httpRequest = require('supertest');
 const { createApp } = require('../app');
-const { FIXTURE_NAMES, loadFixture } = require('../clients/fixture-clients');
+const { FIXTURE_NAMES, loadFixture, createFixtureClients } = require('../clients/fixture-clients');
 const { parseCandidateRequest } = require('../validation/allocation-input');
 
 const contractPath = path.resolve(__dirname, '../../../../contracts/openapi/allocation.openapi.yaml');
@@ -52,9 +52,9 @@ function checkObjectFields(value, schema) {
   }
 }
 
-test('draft OpenAPI identifies health and both candidate searches as implemented while scoring stays planned', () => {
+test('draft OpenAPI identifies health, both candidate searches and explained scoring as implemented', () => {
   assert.equal(contract.openapi, '3.1.0');
-  assert.equal(contract.info.version, '0.4.0');
+  assert.equal(contract.info.version, '0.5.0');
   assert.equal(contract.servers[0].url, 'http://localhost:4001');
   assert.deepEqual(Object.keys(contract.paths).sort(), [
     '/allocation/candidates', '/allocation/room-swaps', '/allocation/score', '/health',
@@ -62,9 +62,8 @@ test('draft OpenAPI identifies health and both candidate searches as implemented
   assert.equal(contract.paths['/health'].get['x-implementation-status'], 'implemented');
   assert.equal(contract.paths['/allocation/candidates'].post['x-implementation-status'], 'implemented');
   assert.equal(contract.paths['/allocation/room-swaps'].post['x-implementation-status'], 'implemented');
-  assert.equal(contract.paths['/allocation/score'].post['x-implementation-status'], 'planned');
-  assert.match(contract.paths['/allocation/score'].post.description, /404/);
-  for (const route of ['/allocation/candidates', '/allocation/room-swaps']) {
+  assert.equal(contract.paths['/allocation/score'].post['x-implementation-status'], 'implemented');
+  for (const route of ['/allocation/candidates', '/allocation/room-swaps', '/allocation/score']) {
     const responses = contract.paths[route].post.responses;
     for (const status of ['200', '400', '404', '409', '413', '415', '422', '503', '504', '500']) {
       assert.ok(responses[status], `Missing documented ${route} response: ${status}`);
@@ -301,13 +300,140 @@ test('zero displacement allowance is a documented successful empty swap search',
   assert.ok(result.reasons.length > 0);
 });
 
-test('documented planned scoring endpoint still returns an unknown-route error', async () => {
+test('documented scoring input accepts bounded explicit plans rather than IDs for lookup', () => {
+  const schemas = contract.components.schemas;
+  const schema = schemas.ScoreRequest;
+  assert.equal(schema.additionalProperties, false);
+  assert.deepEqual(schema.required, [
+    'scenarioId', 'scenarioRevision', 'facilitiesVersion', 'affectedSessionId', 'allowedMoveCount', 'candidates',
+  ]);
+  assert.equal(schema.properties.candidateIds, undefined);
+  assert.equal(schema.properties.scenarioRevision.maximum, Number.MAX_SAFE_INTEGER);
+  assert.equal(schema.properties.candidates.minItems, 0);
+  assert.equal(schema.properties.candidates.maxItems, 50);
+  const submitted = resolveReference(schema.properties.candidates.items.$ref);
+  assert.equal(submitted.additionalProperties, false);
+  assert.deepEqual(submitted.required, ['candidateId', 'moves']);
+  assert.equal(submitted.properties.moves.minItems, 1);
+  assert.equal(submitted.properties.moves.maxItems, 2);
+  const example = contract.paths['/allocation/score'].post.requestBody.content['application/json'].example;
+  checkObjectFields(example, schema);
+  for (const candidate of example.candidates) checkObjectFields(candidate, submitted);
+  assert.deepEqual(schemas.ScoringPolicy.properties.weights.required, [
+    'displacedExistingSessions', 'timeChangedSessions', 'buildingChangedSessions', 'totalUnusedSeats',
+  ]);
+});
+
+test('actual scores match the documented fixed policy, counts, contributions and pending metadata', async () => {
+  const operation = contract.paths['/allocation/score'].post;
+  const responseSchema = resolveReference(operation.responses['200'].content['application/json'].schema.$ref);
+  const rankedSchema = resolveReference(responseSchema.properties.rankedCandidates.items.$ref);
+  const policySchema = resolveReference(responseSchema.properties.scoringPolicy.$ref);
+  const breakdownSchema = resolveReference(rankedSchema.properties.costBreakdown.$ref);
+  const app = createApp();
+  const example = operation.requestBody.content['application/json'].example;
+  const exampleResponse = await httpRequest(app).post('/allocation/score').send(example).expect(200);
+  assert.equal(exampleResponse.body.rankedCandidates[0].cost, 2);
+
+  for (const [name, route, kind, cost] of [
+    ['direct-room', '/allocation/candidates', 'direct', 2],
+    ['equipment-failure', '/allocation/candidates', 'direct', 1],
+    ['single-relocation', '/allocation/room-swaps', 'relocation', 103],
+    ['single-swap', '/allocation/room-swaps', 'swap', 103],
+  ]) {
+    const fixture = loadFixture(name);
+    const generated = await httpRequest(app).post(route).send(fixture.request).expect(200);
+    const submission = {
+      scenarioId: fixture.scenarioId,
+      scenarioRevision: fixture.scenarioRevision,
+      facilitiesVersion: fixture.facilitiesVersion,
+      affectedSessionId: fixture.request.affectedSessionId,
+      allowedMoveCount: fixture.request.allowedMoveCount,
+      candidates: generated.body.candidates.map(({ candidateId, moves }) => ({ candidateId, moves })),
+    };
+    const response = await httpRequest(app).post('/allocation/score').send(submission).expect(200);
+    const result = response.body;
+    checkObjectFields(result, responseSchema);
+    assert.equal(typeof response.headers['x-request-id'], 'string');
+    for (const field of ['mode', 'scope', 'validationStatus']) {
+      assert.equal(result[field], responseSchema.properties[field].const);
+    }
+    assert.equal(result.scenarioId, fixture.scenarioId);
+    assert.equal(result.scenarioRevision, fixture.scenarioRevision);
+    assert.equal(result.facilitiesVersion, fixture.facilitiesVersion);
+    checkObjectFields(result.scoringPolicy, policySchema);
+    assert.equal(result.scoringPolicy.version, policySchema.properties.version.const);
+    checkObjectFields(result.scoringPolicy.weights, policySchema.properties.weights);
+    for (const [field, weight] of Object.entries(policySchema.properties.weights.properties)) {
+      assert.equal(result.scoringPolicy.weights[field], weight.const);
+    }
+    assert.equal(result.rankedCandidates.length, submission.candidates.length);
+    assert.ok(result.reasons.every((reason) => typeof reason === 'string'));
+    for (const [index, candidate] of result.rankedCandidates.entries()) {
+      checkObjectFields(candidate, rankedSchema);
+      assert.equal(candidate.rank, index + 1);
+      assert.equal(candidate.kind, kind);
+      assert.equal(candidate.validationStatus, rankedSchema.properties.validationStatus.const);
+      assert.equal(candidate.cost, cost);
+      assert.ok(candidate.reasons.every((reason) => typeof reason === 'string'));
+      const submitted = submission.candidates.find((item) => item.candidateId === candidate.candidateId);
+      assert.ok(submitted);
+      assert.deepEqual(candidate.moves, submitted.moves);
+      checkObjectFields(candidate.costBreakdown, breakdownSchema);
+      assert.equal(candidate.costBreakdown.timeChangedSessions, 0);
+      assert.equal(candidate.costBreakdown.buildingChangedSessions, 0);
+      assert.equal(candidate.costBreakdown.displacedExistingSessions, kind === 'direct' ? 0 : 1);
+      checkObjectFields(candidate.costBreakdown.weightedCosts, breakdownSchema.properties.weightedCosts);
+      for (const [field, weight] of Object.entries(result.scoringPolicy.weights)) {
+        assert.ok(Number.isInteger(candidate.costBreakdown[field]));
+        assert.ok(candidate.costBreakdown[field] >= 0);
+        assert.equal(candidate.costBreakdown.weightedCosts[field], candidate.costBreakdown[field] * weight);
+      }
+      assert.equal(candidate.cost, Object.values(candidate.costBreakdown.weightedCosts)
+        .reduce((sum, contribution) => sum + contribution, 0));
+    }
+  }
+});
+
+test('documented equal-cost ties use candidate ID rather than caller order', async () => {
+  const fixture = loadFixture('direct-room');
+  for (const roomId of ['ROOM_EQUAL_A', 'ROOM_EQUAL_B']) {
+    fixture.rooms.push({ roomId, seats: 80, features: ['projector'], usableComputers: 0, building: 'Main' });
+  }
+  const app = createApp({ clients: createFixtureClients({ fixture }) });
+  const generated = await httpRequest(app).post('/allocation/candidates').send(fixture.request).expect(200);
+  const candidates = generated.body.candidates.map(({ candidateId, moves }) => ({ candidateId, moves })).reverse();
+  const response = await httpRequest(app).post('/allocation/score').send({
+    scenarioId: fixture.scenarioId, scenarioRevision: fixture.scenarioRevision,
+    facilitiesVersion: fixture.facilitiesVersion, affectedSessionId: fixture.request.affectedSessionId,
+    allowedMoveCount: fixture.request.allowedMoveCount, candidates,
+  }).expect(200);
+  assert.equal(response.body.rankedCandidates.length, 3);
+  assert.deepEqual(response.body.rankedCandidates.map((candidate) => candidate.candidateId),
+    candidates.map((candidate) => candidate.candidateId).sort());
+  assert.deepEqual(response.body.rankedCandidates.map((candidate) => candidate.rank), [1, 2, 3]);
+  assert.ok(response.body.rankedCandidates.every((candidate) => candidate.cost === 2));
+});
+
+test('empty score batches still check versions and invalid plans reject without a partial ranking', async () => {
   const operation = contract.paths['/allocation/score'].post;
   const example = operation.requestBody.content['application/json'].example;
-  const response = await httpRequest(createApp()).post('/allocation/score').send(example).expect(404);
-  const errorSchema = resolveReference(resolveReference(operation.responses['404'].$ref)
+  const app = createApp();
+  const empty = await httpRequest(app).post('/allocation/score').send({ ...example, candidates: [] }).expect(200);
+  checkObjectFields(empty.body, contract.components.schemas.ScoreResponse);
+  assert.deepEqual(empty.body.rankedCandidates, []);
+  assert.equal(empty.body.validationStatus, 'pending');
+  const stale = await httpRequest(app).post('/allocation/score')
+    .send({ ...example, facilitiesVersion: 'fixture-old', candidates: [] }).expect(409);
+  assert.equal(stale.body.code, 'STALE_FACILITIES');
+
+  const tampered = { ...structuredClone(example.candidates[0]), candidateId: 'candidate-tampered' };
+  const rejected = await httpRequest(app).post('/allocation/score')
+    .send({ ...example, candidates: [...example.candidates, tampered] }).expect(422);
+  const errorSchema = resolveReference(resolveReference(operation.responses['422'].$ref)
     .content['application/json'].schema.$ref);
-  checkObjectFields(response.body, errorSchema);
-  assert.equal(response.body.code, 'NOT_FOUND');
-  assert.equal(response.body.traceId, response.headers['x-request-id']);
+  checkObjectFields(rejected.body, errorSchema);
+  assert.equal(rejected.body.code, 'INVALID_CANDIDATE');
+  assert.equal(rejected.body.rankedCandidates, undefined);
+  assert.equal(rejected.body.traceId, rejected.headers['x-request-id']);
 });

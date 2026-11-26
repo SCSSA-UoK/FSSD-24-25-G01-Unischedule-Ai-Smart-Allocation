@@ -238,7 +238,7 @@ test('swap results have stable candidate IDs, unique runs and unchanged source d
   assert.ok(!JSON.stringify(first.body).includes('FAKE_EXPECTED'));
 });
 
-test('direct search remains direct-only for every fixture and scoring is still an unknown route', async () => {
+test('direct search remains direct-only for every fixture and scoring rejects an empty request', async () => {
   const app = createApp();
   for (const name of FIXTURE_NAMES) {
     const fixture = loadFixture(name);
@@ -248,7 +248,7 @@ test('direct search remains direct-only for every fixture and scoring is still a
     assert.ok(response.body.candidates.every((candidate) => candidate.moves.length === 1));
   }
   const score = await request(app).post('/allocation/score').send({});
-  assertError(score, 404, 'NOT_FOUND');
+  assertError(score, 422, 'INVALID_INPUT');
 });
 
 test('a swap search time limit reports truncation instead of claiming a completed empty search', async () => {

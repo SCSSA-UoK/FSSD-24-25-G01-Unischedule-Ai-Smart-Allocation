@@ -1,11 +1,11 @@
 openapi: 3.1.0
 info:
   title: Allocation service contract
-  version: 0.4.0
+  version: 0.5.0
   description: >-
-    Draft for team review. Health, direct candidates and single-displacement
-    room-swaps endpoints are implemented with fictional snapshots. Scoring,
-    authentication, live backend integration and storage are not implemented.
+    Draft for team review. Health, direct candidates, single-displacement room
+    swaps and explained fixed scoring are implemented with fictional snapshots.
+    Authentication, live backend integration and storage are not implemented.
     Every proposal remains pending. Allocation never writes bookings.
 servers:
   - url: http://localhost:4001
@@ -125,23 +125,45 @@ paths:
   /allocation/score:
     post:
       operationId: scoreAllocationCandidates
-      x-implementation-status: planned
+      x-implementation-status: implemented
       description: >-
-        Planned comparison of candidates from the same scenario revision;
-        currently returns 404 after JSON parsing. A cost never establishes
-        scheduling validity or authorizes applying a move.
+        Fixture-only scoring of up to 50 submitted direct or single-displacement
+        plans against one scenario revision and facilities version. Requires JSON.
+        No candidate storage exists, so callers submit candidateId and moves,
+        rather than candidateIds for lookup. Sources, unchanged original times,
+        target membership, original blockers, content IDs and copied final room
+        assignments are rechecked before scoring. A content hash is not an
+        authentication signature. Invalid plans reject the whole batch with 422
+        INVALID_CANDIDATE; no partial ranking is returned. Version mismatches
+        reject even an empty batch, including 409 STALE_FACILITIES. Strict input
+        validation rejects caller-supplied status, kind, counts, reasons or costs.
+        Lower cost wins, then candidate ID in stable code-point order. Ranking is
+        limited to submitted plans and never establishes validity, approval or a
+        global optimum. Generation endpoints retain their unscored responses.
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: '#/components/schemas/ScoreRequest' }
             example:
-              scenarioId: scenario-relocation-001
+              scenarioId: scenario-direct-001
               scenarioRevision: 3
-              candidateIds: [candidate-001]
+              facilitiesVersion: fixture-v1
+              affectedSessionId: S007
+              allowedMoveCount: 0
+              candidates:
+                - candidateId: candidate-c92b306670b917673d908850
+                  moves:
+                    - sessionId: S007
+                      fromRoomId: null
+                      toRoomId: HALL_A
+                      startAt: '2026-11-16T09:00:00+05:30'
+                      endAt: '2026-11-16T11:00:00+05:30'
       responses:
         '200':
-          description: Planned ranking with lower costs preferred.
+          description: >-
+            Explained fixed costs for the submitted eligible plans, all pending.
+            An empty batch returns an empty ranking after snapshot version checks.
           headers:
             X-Request-Id: { $ref: '#/components/headers/RequestId' }
           content:
@@ -154,6 +176,8 @@ paths:
         '415': { $ref: '#/components/responses/ErrorResponse' }
         '422': { $ref: '#/components/responses/ErrorResponse' }
         '503': { $ref: '#/components/responses/ErrorResponse' }
+        '504': { $ref: '#/components/responses/ErrorResponse' }
+        '500': { $ref: '#/components/responses/ErrorResponse' }
 components:
   headers:
     RequestId:
@@ -163,9 +187,9 @@ components:
     ErrorResponse:
       description: >-
         Flat JSON error. 400 malformed JSON; 404 missing route or ID; 409 stale
-        revision; 413 body over 100kb; 415 unsupported body encoding or non-JSON
-        search request (UNSUPPORTED_MEDIA_TYPE); 422 invalid input or
-        requirements; 503 failed dependency read; 504 dependency read timeout;
+        scenario or facilities version; 413 body over 100kb; 415 unsupported body
+        encoding or non-JSON request (UNSUPPORTED_MEDIA_TYPE); 422 invalid input,
+        requirements or submitted candidate; 503 failed dependency read; 504 dependency read timeout;
         500 unexpected failure. Input preparation waits at most 5000ms by default,
         independently of the search-loop budget. Unexpected messages stay generic.
       headers:
@@ -252,14 +276,30 @@ components:
         endAt: { $ref: '#/components/schemas/OffsetDateTime' }
     CostBreakdown:
       type: object
-      description: Proposed future scoring components; not emitted by implemented candidate endpoints.
+      description: >-
+        Server-derived counts for moved sessions only. The target is excluded
+        from displacedExistingSessions, but included in building changes when
+        it has an original room. A null origin contributes zero building changes.
+        Unused seats are summed at every moved session's destination. Current
+        plans preserve original times, so timeChangedSessions is always zero.
+        Contributions use the fixed policy; a lower cost cannot excuse a failed
+        local room constraint. Cost is on the ranked candidate, not repeated here.
       additionalProperties: false
+      required: [displacedExistingSessions, timeChangedSessions, buildingChangedSessions, totalUnusedSeats, weightedCosts]
       properties:
         displacedExistingSessions: { type: integer, minimum: 0 }
         timeChangedSessions: { type: integer, minimum: 0 }
         buildingChangedSessions: { type: integer, minimum: 0 }
         totalUnusedSeats: { type: integer, minimum: 0 }
-        cost: { type: number, minimum: 0 }
+        weightedCosts:
+          type: object
+          additionalProperties: false
+          required: [displacedExistingSessions, timeChangedSessions, buildingChangedSessions, totalUnusedSeats]
+          properties:
+            displacedExistingSessions: { type: number, minimum: 0 }
+            timeChangedSessions: { type: number, minimum: 0 }
+            buildingChangedSessions: { type: number, minimum: 0 }
+            totalUnusedSeats: { type: number, minimum: 0 }
     Candidate:
       type: object
       additionalProperties: false
@@ -400,32 +440,84 @@ components:
     ScoreRequest:
       type: object
       additionalProperties: false
-      required: [scenarioId, scenarioRevision, candidateIds]
+      description: >-
+        One versioned context for the whole batch. Candidate IDs must be unique;
+        session IDs within each move list must also be unique. Those conditions
+        and unchanged original source/timestamp checks are enforced at runtime.
+        No costs, validation claims or private snapshot data are accepted.
+      required: [scenarioId, scenarioRevision, facilitiesVersion, affectedSessionId, allowedMoveCount, candidates]
       properties:
         scenarioId: { $ref: '#/components/schemas/Id' }
         scenarioRevision: { type: integer, minimum: 0, maximum: 9007199254740991 }
-        candidateIds:
+        facilitiesVersion: { $ref: '#/components/schemas/Id' }
+        affectedSessionId: { $ref: '#/components/schemas/Id' }
+        allowedMoveCount: { type: integer, minimum: 0, maximum: 3 }
+        candidates:
+          type: array
+          minItems: 0
+          maxItems: 50
+          items: { $ref: '#/components/schemas/SubmittedCandidate' }
+    SubmittedCandidate:
+      type: object
+      additionalProperties: false
+      required: [candidateId, moves]
+      properties:
+        candidateId: { $ref: '#/components/schemas/Id' }
+        moves:
           type: array
           minItems: 1
-          maxItems: 50
-          uniqueItems: true
-          items: { $ref: '#/components/schemas/Id' }
+          maxItems: 2
+          items: { $ref: '#/components/schemas/Move' }
+    ScoringPolicy:
+      type: object
+      additionalProperties: false
+      required: [version, weights]
+      properties:
+        version: { type: string, const: allocation-cost-v1 }
+        weights:
+          type: object
+          additionalProperties: false
+          required: [displacedExistingSessions, timeChangedSessions, buildingChangedSessions, totalUnusedSeats]
+          properties:
+            displacedExistingSessions: { type: number, const: 100 }
+            timeChangedSessions: { type: number, const: 200 }
+            buildingChangedSessions: { type: number, const: 10 }
+            totalUnusedSeats: { type: number, const: 0.1 }
+    RankedCandidate:
+      type: object
+      additionalProperties: false
+      required: [candidateId, rank, kind, validationStatus, moves, cost, costBreakdown, reasons]
+      properties:
+        candidateId: { $ref: '#/components/schemas/Id' }
+        rank: { type: integer, minimum: 1, maximum: 50 }
+        kind: { type: string, enum: [direct, relocation, swap] }
+        validationStatus: { type: string, const: pending }
+        moves:
+          type: array
+          minItems: 1
+          maxItems: 2
+          items: { $ref: '#/components/schemas/Move' }
+        cost: { type: number, minimum: 0 }
+        costBreakdown: { $ref: '#/components/schemas/CostBreakdown' }
+        reasons: { type: array, items: { type: string } }
     ScoreResponse:
       type: object
       additionalProperties: false
-      required: [rankedCandidates]
+      required: [runId, mode, scope, validationStatus, scenarioId, scenarioRevision, facilitiesVersion, scoringPolicy, rankedCandidates, reasons]
       properties:
+        runId: { $ref: '#/components/schemas/Id' }
+        mode: { type: string, const: fixture }
+        scope: { type: string, const: submitted-candidates }
+        validationStatus: { type: string, const: pending }
+        scenarioId: { $ref: '#/components/schemas/Id' }
+        scenarioRevision: { type: integer, minimum: 0, maximum: 9007199254740991 }
+        facilitiesVersion: { $ref: '#/components/schemas/Id' }
+        scoringPolicy: { $ref: '#/components/schemas/ScoringPolicy' }
         rankedCandidates:
           type: array
           maxItems: 50
-          items:
-            type: object
-            additionalProperties: false
-            required: [candidateId, cost, validationStatus]
-            properties:
-              candidateId: { $ref: '#/components/schemas/Id' }
-              cost: { type: number, minimum: 0 }
-              validationStatus: { $ref: '#/components/schemas/ValidationStatus' }
+          items: { $ref: '#/components/schemas/RankedCandidate' }
+        reasons: { type: array, items: { type: string } }
     Error:
       type: object
       additionalProperties: false
