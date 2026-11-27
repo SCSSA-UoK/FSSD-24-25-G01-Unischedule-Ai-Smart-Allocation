@@ -6,7 +6,7 @@
 
 This service recommends rooms and recovery arrangements. It searches empty rooms, explores moving existing lectures, and compares solutions. It must never update official or simulated timetable bookings. Spring Boot alone validates scheduling and applies administrator-approved simulation changes.
 
-**Available now:** an Express service with `GET /health`, direct search at `POST /allocation/candidates`, single-displacement search at `POST /allocation/room-swaps`, and explained cost ranking at `POST /allocation/score`. [Five fictional fixtures](fixtures/README.md) support independent testing. Direct candidates move only the target; relocation/swap candidates contain both the target and one other lecture's move, preserving each session's original time. All remain fixture/pending. Longer move chains, live integration, authentication, persistence and allocation UI pages remain **planned**.
+**Available now:** an Express service with `GET /health`, direct search at `POST /allocation/candidates`, single-displacement search at `POST /allocation/room-swaps`, explained cost ranking at `POST /allocation/score`, and optional MongoDB run storage with `GET /allocation/results/{runId}`. [Five fictional fixtures](fixtures/README.md) support independent testing. Direct candidates move only the target; relocation/swap candidates contain both the target and one other lecture's move, preserving each session's original time. All remain fixture/pending. Longer move chains, live integration, authentication and allocation UI pages remain **planned**.
 
 The Platform validation transport and guarded `POST /allocation/validate` boundary are implemented. Authoritative validation is **not integrated**: the current Platform has no compatible versioned snapshot/validation API or service authentication, and allocation inputs remain fixture-only. The default validation response is an explicit 503. Mock evidence can be exercised through test injection and never creates an authoritative recommendation.
 
@@ -143,7 +143,7 @@ services/allocation-service/
     services/                  # shared inputs, room inspection, candidate generation and scoring
     algorithms/                # intervals, room checks, candidate identity, final assignments and costs
     clients/                   # read-only fixture clients and sample normalizers
-    models/                    # placeholder
+    models/                    # allocation-owned MongoDB run repository
     validation/                # request, session, room and snapshot schemas
   fixtures/
 ```
@@ -152,19 +152,19 @@ Algorithms should accept plain data so they can be tested without a live LLM or 
 
 ## 7. MongoDB design
 
-Use owned logical database `allocation_db` under the shared MongoDB URI.
+Use the owned logical database `allocation_db` under the shared MongoDB URI. Persistence is disabled by default and requires explicit `ALLOCATION_PERSISTENCE=mongodb`; having a shared URI alone does not connect or write. `ALLOCATION_DB` selects an explicit allocation-owned database, independently of any database path in the URI. Names must start with `allocation_`; another member's database cannot be selected.
 
-| Collection | Suggested fields | Indexes |
-|---|---|---|
-| `optimization_runs` | runId, scenarioId, scenarioRevision, request, limits, status, elapsedMs, truncated, facilitiesVersion, createdAt | unique runId; scenarioId + createdAt |
-| `allocation_candidates` | candidateId, runId, moves, costBreakdown, reasons, validationStatus, validationReference, validatedAt | unique candidateId; runId + cost |
-| `scoring_settings` | version, weights, searchLimits, createdAt | unique version |
+The implemented collection is **`optimization_runs`**. One immutable document contains the parsed request, operation, timestamps, measured elapsed time, outcome, scenario/revision, facilities version, limits, scoring version, candidate/validated counts and complete response or sanitized error. All candidate moves, costs and evidence are embedded in that response. `_id` is the run ID and provides uniqueness; a `scenarioId + createdAt` index supports future history queries. Candidate IDs may repeat across runs and are not globally unique records.
 
-Use public IDs separately from MongoDB `_id`. Record scoring and facilities versions for reproducibility. Agree retention for large temporary snapshots. Do not create a timetable-bookings collection here.
+A single acknowledged insert stores each final run and all its candidates together. This works with standalone MongoDB without transactions across collections; see [MongoDB single-document atomicity](https://www.mongodb.com/docs/manual/core/write-operations-atomicity/). A result over 12 MiB is rejected with `503 RUN_STORAGE_LIMIT` before insertion. No timetable, bookings, separate candidate or scoring-settings collection is created. Scoring remains fixed policy version `allocation-cost-v1`.
+
+Runs have `completed`, `truncated` or `error` status. A complete empty search is completed; a limit-stopped search is truncated. Elapsed milliseconds include input preparation and computation, excluding JSON parsing and the final database insert. Error records contain the requested context and safe status/code/message/trace ID, with no partial result. Unknown source facts may be null. No headers, service credentials, MongoDB URI, stack traces or fixture expectations are stored.
+
+Final records are written before a successful response. A storage failure returns an explicit 503 without a memory fallback; an ambiguous failed write may still be inspectable later by run ID. There is no running-state recovery: a process terminated before the final insert may leave no record. Database retention and pruning remain future work. Only the allocation database and collection are accessed by this repository.
 
 ## 8. REST API and JSON examples
 
-The [OpenAPI contract](../../contracts/openapi/allocation.openapi.yaml) documents the implemented fixture-only direct/swap/scoring endpoints and health route. Result lookup and analytics remain proposals. The contract awaits team review and does not establish live upstream compatibility or implemented authentication.
+The [OpenAPI contract](../../contracts/openapi/allocation.openapi.yaml) documents the implemented fixture-only generation/scoring routes, guarded validation, optional stored-run lookup and health route. Analytics remains proposed. The contract awaits team review and does not establish live upstream compatibility or implemented authentication.
 
 | Method and path | Behavior | Status |
 |---|---|---|
@@ -173,7 +173,7 @@ The [OpenAPI contract](../../contracts/openapi/allocation.openapi.yaml) document
 | POST `/allocation/room-swaps` | One displaced lecture, including a two-way room exchange | Implemented, 200 |
 | POST `/allocation/score` | Recheck submitted plans and rank by explained fixed costs | Implemented, 200 |
 | POST `/allocation/validate` | Whole-plan validation boundary with evidence/freshness checks | Implemented guard; default 503, live integration pending |
-| GET `/allocation/results/{runId}` | Stored run lookup | Planned |
+| GET `/allocation/results/{runId}` | Retrieve the historical run and its complete response | Implemented; MongoDB storage must be enabled |
 | GET `/allocation/analytics?from=...&to=...` | Benchmark summaries | Planned |
 
 Send `Content-Type: application/json`. The default resolver accepts only the five fixture scenario IDs in the [fixture guide](fixtures/README.md); an unknown scenario returns 404 instead of falling back to another dataset. Clients can be injected through `createApp({ clients })` for independent tests. Neither endpoint calls timetable mutation or apply APIs.
@@ -232,7 +232,7 @@ The response retains the common metadata but has `scope: "single-displacement"`.
 
 ### Scoring submitted plans
 
-`POST /allocation/score` accepts a strict versioned context and up to 50 submitted plans, each containing only `candidateId` and one or two complete `moves`. Candidate storage is not implemented, so IDs alone cannot look up prior results. Project these fields from a generation response; omit generated reasons, status, kind and displacement summaries. Caller-supplied costs, policy weights and validation claims are rejected as unknown fields.
+`POST /allocation/score` accepts a strict versioned context and up to 50 submitted plans, each containing only `candidateId` and one or two complete `moves`. Stored runs can be retrieved as a whole; this scoring endpoint still accepts complete plans, rather than looking up IDs alone. Project these fields from a generation or stored response; omit generated reasons, status, kind and displacement summaries. Caller-supplied costs, policy weights and validation claims are rejected as unknown fields.
 
 ```json
 {
@@ -255,7 +255,15 @@ The service reads both source snapshots once, checks scenario and facilities ver
 
 The response identifies the snapshot and policy, has `scope: "submitted-candidates"`, and returns `rankedCandidates` with one-based ranks, costs, component counts, weighted contributions, moves and explanations. The example costs **103**: one displaced lecture contributes 100 and `(50 - 40) + (80 - 60) = 30` unused seats contribute 3. Its time and building components are zero. A direct 60-student target moving to an 80-seat hall costs **2**. A literal cross-building exchange counts both moved lectures' building changes.
 
-All results stay `mode: "fixture"` and `validationStatus: "pending"`. Ranking covers only the submitted alternatives, so it cannot establish a global optimum or recover candidates omitted by a truncated search. Empty lists return an empty ranking after input and version checks. Scoring does not search, store runs, validate lecturer/group conflicts or apply timetable changes. Generation endpoint shapes and their room-ID ordering are unchanged.
+All results stay `mode: "fixture"` and `validationStatus: "pending"`. Ranking covers only the submitted alternatives, so it cannot establish a global optimum or recover candidates omitted by a truncated search. Empty lists return an empty ranking after input and version checks. Scoring does not search, validate lecturer/group conflicts or apply timetable changes. Its HTTP run is stored when persistence is enabled. Generation endpoint shapes and their room-ID ordering are unchanged.
+
+### Storing and looking up a run
+
+With storage enabled, the four allocation POST operations save their final result or operational error. `X-Allocation-Persistence: enabled` reports the configured mode; `X-Allocation-Run-Id` identifies an accepted parsed operation, including one that fails. A successful saved response also returns `Location: /allocation/results/{runId}`, and its JSON `runId` matches that resource. Invalid JSON, content types or request schemas do not create runs. `X-Allocation-Persistence: disabled` means run IDs are temporary and no database is contacted; response body shapes otherwise remain the same.
+
+`GET /allocation/results/{runId}` requires a generated lowercase run UUID. It returns 422 for a malformed ID, 503 for disabled/unavailable storage and 404 for an unknown run. A successful response contains the run metadata, parsed `request`, complete `response` or `error`, and `historical: true`, with `Cache-Control: no-store`. MongoDB's internal `_id` is omitted.
+
+Retrieval reproduces historical data and does not refresh validation, promote pending evidence or authorize application. To rescore stored candidates, submit the original complete moves and versioned context to `/allocation/score`; its existing current-source checks still reject changed revisions, facilities or identities. Authentication is not implemented for run lookup, and possession of a UUID is not an access-control policy.
 
 ### Platform validation adapter
 
@@ -349,11 +357,20 @@ $scoreBody = @{
 Invoke-RestMethod -Method Post -Uri http://localhost:4001/allocation/score -ContentType 'application/json' -Body $scoreBody
 ```
 
-`src/app.js` constructs the Express app without listening or loading private configuration. `src/server.js` loads configuration and starts the listener. The HTTP service and tests run without MongoDB, Platform, Facilities or an LLM.
+`src/app.js` constructs the Express app without listening, opening a database or loading private configuration. `src/server.js` loads configuration and starts the listener after initializing enabled storage. The default HTTP service and unit tests run without MongoDB, Platform, Facilities or an LLM.
 
 `src/config/env.js` resolves the shared **root** `.env` relative to the file, independently of the terminal's working directory. Existing shell environment values take precedence. A missing `.env` uses defaults; an unreadable file or invalid configuration stops startup. Explicit ports must be integers from 1 to 65535 and the configured timezone must be recognized by Node's timezone data.
 
-MongoDB is not required for the implemented HTTP endpoints. When persistence is added, the existing root `docker-compose.yml` provides a local standalone MongoDB through `docker compose up -d mongodb`. Never put credentials in source or fixtures.
+MongoDB is required only when persistence is enabled. Use an existing local MongoDB service, or the root Docker Compose MongoDB when Docker is running. To enable local storage in a PowerShell session:
+
+```powershell
+$env:ALLOCATION_PERSISTENCE = 'mongodb'
+$env:MONGODB_URI = 'mongodb://127.0.0.1:27017'
+$env:ALLOCATION_DB = 'allocation_db'
+npm.cmd start
+```
+
+Startup rejects unavailable MongoDB with a value-free error. The driver uses bounded server-selection, connection and socket waits, a small shared pool and acknowledged majority writes. It closes after HTTP requests drain on graceful shutdown, and on a listen failure. Never put credentials in source or fixtures.
 
 | Variable | Status / use |
 |---|---|
@@ -362,11 +379,12 @@ MongoDB is not required for the implemented HTTP endpoints. When persistence is 
 | `PLATFORM_VALIDATION_BASE_URL` | Optional validation HTTP origin; unset by default. HTTPS required except localhost/loopback HTTP. No subpath, userinfo, query or fragment |
 | `PLATFORM_VALIDATION_TOKEN` | Server-only Bearer service token required when a validation origin is configured; actual credentials/auth agreement pending |
 | `PLATFORM_VALIDATION_TIMEOUT_MS=5000` | Validation HTTP deadline, integer 1-10000; includes response-body reading |
-| `MONGODB_URI` | Existing key; unused by the HTTP scaffold; select `allocation_db` when implementing persistence |
+| `ALLOCATION_PERSISTENCE=disabled` | `disabled` or `mongodb`; database access requires explicit opt-in |
+| `MONGODB_URI` | Server-only connection URI used only in MongoDB mode; defaults to `mongodb://127.0.0.1:27017` when absent |
 | `FACILITIES_PORT=4002` | Existing key; reserved for facilities integration |
 | `PLATFORM_BASE_URL=http://localhost:8081` | Proposed new root key matching current Java configuration; confirm first |
 | `FACILITIES_BASE_URL=http://localhost:4002` | Proposed new root key |
-| `ALLOCATION_DB=allocation_db` | Optional proposed root key |
+| `ALLOCATION_DB=allocation_db` | Explicit allocation-owned database; allowed names begin `allocation_` |
 | `USE_MOCK_CLIENTS=true` | Proposed development-only fixture adapter key |
 
 The template's `SPRING_PORT=8080` does not override the current hardcoded Java port. Container URLs will differ from localhost when application containers are introduced. Keep `.env` untracked; never expose secrets via `NEXT_PUBLIC_*`.
@@ -378,6 +396,10 @@ Validation settings are read after the root environment loader, with the same sh
 Run `npm.cmd test` from the service directory. Checks cover HTTP/configuration, strict inputs, normalization, fixture isolation, revisions/references, preview commands, OpenAPI, room checks, candidate generation and scoring. Direct tests cover target-only moves and zero displacement. Swap tests cover both moves together, actual room exchanges, multiple blockers, the displaced session's full interval/requirements, hidden occupancy in the target's former room, partial closures/outages and copied final assignments. Both cover stable IDs/order, exact/overflow limits, deterministic time budgets, sanitized dependency failures and unchanged sources. Scoring checks cover component costs, stable ties, version/source consistency, invalid complete plans, strict caller fields and pending-only results. Environment tests use temporary files instead of private root configuration. Live integration is not implemented.
 
 Validation tests use explicit fixture injection or local ephemeral HTTP servers. They verify whole-plan transport, Bearer headers, identity-bound evidence, stale revisions/facilities/timestamps, lecturer/group conflict responses, malformed/contradictory evidence, post-validation freshness reads, cancellation, header/body deadlines, redirects and sanitized failures. These are adapter contract tests and do not establish a successful connection to the real Spring Boot validator.
+
+Persistence unit tests use explicit fake stores/collections to check acknowledgment, size limits, safe lookups, immutable history, complete/truncated/error records, all four operation round trips, disabled mode and sanitized failures. They do not claim database durability.
+
+Run `npm.cmd run test:persistence` with local MongoDB available on `127.0.0.1:27017` for the real restart check. It creates one uniquely named `allocation_test_...` database, starts and stops two separate allocation Node processes, retrieves identical stored results after restart, and checks repeated candidate IDs across distinct runs. It explicitly overrides the URI/database, skips private root configuration and cleans up only its isolated database after stopping its own processes. Failure is reported as a test failure, not a skipped or simulated success. It never uses Atlas or restarts the MongoDB service.
 
 `prepareAllocationInput(request, { platformClient, facilitiesClient })` validates the request before reading the two clients, combines their snapshots and rejects mismatched scenarios/revisions, missing sessions and invalid room references. Fixture clients implement `getScenarioSnapshot(scenarioId)` and `getRoomSnapshot()`, return fresh copies and expose no mutation methods. Dependency failures propagate; no successful candidate or validity is invented.
 
@@ -436,6 +458,7 @@ Demonstrate the 100-seat case: direct search fails, relocation succeeds, both mo
 - [ ] Candidates record IDs, revision, facilities freshness and validation evidence.
 - [ ] Search, comparison, visualization and analytics pages handle errors/empty results.
 - [ ] Owned collections and root environment loading work independently.
+- [x] Optional allocation-owned MongoDB runs survive allocation-service restarts and support historical lookup.
 - [ ] Allocation cannot write timetable bookings or call apply.
 - [ ] Contracts, benchmarks and demonstration fixtures are documented.
 - [ ] Team agrees ports, recurrence mapping, weights, auth and search limits.

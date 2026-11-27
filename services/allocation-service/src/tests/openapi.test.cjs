@@ -69,12 +69,27 @@ function fixtureValidator(proposals = []) {
   };
 }
 
+// A transport-contract fake, not a MongoDB or restart-durability demonstration.
+function contractRunStore() {
+  const records = new Map();
+  return {
+    async save(record) {
+      records.set(record.runId, structuredClone(record));
+      return structuredClone(record);
+    },
+    async findById(runId) {
+      return records.has(runId) ? structuredClone(records.get(runId)) : null;
+    },
+  };
+}
+
 test('draft OpenAPI identifies the implemented routes without claiming a live Platform peer', () => {
   assert.equal(contract.openapi, '3.1.0');
-  assert.equal(contract.info.version, '0.6.0');
+  assert.equal(contract.info.version, '0.7.0');
   assert.equal(contract.servers[0].url, 'http://localhost:4001');
   assert.deepEqual(Object.keys(contract.paths).sort(), [
-    '/allocation/candidates', '/allocation/room-swaps', '/allocation/score', '/allocation/validate', '/health',
+    '/allocation/candidates', '/allocation/results/{runId}', '/allocation/room-swaps',
+    '/allocation/score', '/allocation/validate', '/health',
   ]);
   assert.equal(contract.paths['/health'].get['x-implementation-status'], 'implemented');
   assert.equal(contract.paths['/allocation/candidates'].post['x-implementation-status'], 'implemented');
@@ -82,10 +97,14 @@ test('draft OpenAPI identifies the implemented routes without claiming a live Pl
   assert.equal(contract.paths['/allocation/score'].post['x-implementation-status'], 'implemented');
   assert.equal(contract.paths['/allocation/validate'].post['x-implementation-status'], 'implemented');
   assert.equal(contract.paths['/allocation/validate'].post['x-peer-contract-status'], 'proposed');
+  assert.equal(contract.paths['/allocation/results/{runId}'].get['x-implementation-status'], 'implemented');
   for (const route of ['/allocation/candidates', '/allocation/room-swaps', '/allocation/score']) {
     const responses = contract.paths[route].post.responses;
     for (const status of ['200', '400', '404', '409', '413', '415', '422', '503', '504', '500']) {
       assert.ok(responses[status], `Missing documented ${route} response: ${status}`);
+    }
+    for (const header of ['X-Allocation-Persistence', 'X-Allocation-Run-Id', 'Location']) {
+      assert.ok(responses['200'].headers[header], `Missing documented ${route} header: ${header}`);
     }
   }
   assert.ok(contract.paths['/allocation/validate'].post.responses['502']);
@@ -177,6 +196,9 @@ test('actual candidate responses follow documented fixture-only fields and direc
     const result = response.body;
     checkObjectFields(result, responseSchema);
     assert.equal(typeof response.headers['x-request-id'], 'string');
+    assert.equal(response.headers['x-allocation-persistence'], 'disabled');
+    assert.equal(response.headers['x-allocation-run-id'], undefined);
+    assert.equal(response.headers.location, undefined);
     assert.match(result.runId, idPattern);
     assert.ok(!runIds.has(result.runId), 'Each response must identify a separate run');
     runIds.add(result.runId);
@@ -545,4 +567,111 @@ test('validation accepts ten explicit plans and rejects eleven before invoking t
   const rejected = await httpRequest(app).post('/allocation/validate').send({ ...body, candidates }).expect(422);
   assert.equal(rejected.body.code, 'INVALID_INPUT');
   assert.equal(proposals.length, 10);
+});
+
+test('historical lookup documents strict run IDs and distinguishes disabled storage from a missing record', async () => {
+  const operation = contract.paths['/allocation/results/{runId}'].get;
+  const runIdSchema = resolveReference(operation.parameters[0].schema.$ref);
+  const runId = 'run-11111111-1111-4111-8111-111111111111';
+  const pattern = new RegExp(runIdSchema.pattern);
+  assert.match(runId, pattern);
+  for (const invalid of ['candidate-001', 'run-not-a-uuid', runId.toUpperCase(), runId.replace('-4111-', '-1111-')]) {
+    assert.doesNotMatch(invalid, pattern);
+  }
+  const disabled = await httpRequest(createApp()).get(`/allocation/results/${runId}`).expect(503);
+  assert.equal(disabled.body.code, 'RUN_STORAGE_UNAVAILABLE');
+  assert.equal(disabled.body.traceId, disabled.headers['x-request-id']);
+  const app = createApp({ runStore: contractRunStore() });
+  const missing = await httpRequest(app).get(`/allocation/results/${runId}`).expect(404);
+  assert.equal(missing.body.code, 'RUN_NOT_FOUND');
+  await httpRequest(app).get('/allocation/results/run-not-a-uuid').expect(422);
+});
+
+test('persisted POST headers lead to the documented public historical record without changing its response body', async () => {
+  const fixture = loadFixture('direct-room');
+  const runStore = contractRunStore();
+  const app = createApp({ runStore });
+  const generated = await httpRequest(app).post('/allocation/candidates').send(fixture.request).expect(200);
+  const runId = generated.body.runId;
+  assert.match(runId, new RegExp(contract.components.schemas.RunId.pattern));
+  assert.equal(generated.headers['x-allocation-persistence'], 'enabled');
+  assert.equal(generated.headers['x-allocation-run-id'], runId);
+  assert.equal(generated.headers.location, `/allocation/results/${runId}`);
+  const operation = contract.paths['/allocation/results/{runId}'].get;
+  const schema = resolveReference(operation.responses['200'].content['application/json'].schema.$ref);
+  const retrieved = await httpRequest(app).get(generated.headers.location).expect(200);
+  const record = retrieved.body;
+  checkObjectFields(record, schema);
+  assert.equal(retrieved.headers['cache-control'], 'no-store');
+  assert.equal(record.schemaVersion, 1);
+  assert.equal(record.runId, runId);
+  assert.equal(record.operation, 'direct');
+  assert.equal(record.status, 'completed');
+  assert.equal(record.historical, true);
+  assert.ok(Number.isFinite(Date.parse(record.createdAt)));
+  assert.ok(Date.parse(record.completedAt) >= Date.parse(record.createdAt));
+  assert.ok(typeof record.elapsedMs === 'number' && record.elapsedMs >= 0);
+  assert.equal(record.scenarioId, fixture.scenarioId);
+  assert.equal(record.scenarioRevision, fixture.scenarioRevision);
+  assert.equal(record.facilitiesVersion, fixture.facilitiesVersion);
+  assert.equal(record.mode, 'fixture');
+  assert.equal(record.scoringVersion, null);
+  assert.deepEqual(record.limits, fixture.request.limits);
+  assert.deepEqual(record.request, parseCandidateRequest(fixture.request));
+  assert.equal(record.candidateCount, generated.body.candidates.length);
+  assert.equal(record.validatedCount, 0);
+  assert.deepEqual(record.response, generated.body);
+  assert.equal(record.error, null);
+  assert.equal(record._id, undefined);
+
+  // History is a stored snapshot, not a request to read or validate current source data.
+  const historyApp = createApp({
+    runStore,
+    clients: {
+      platformClient: { async getScenarioSnapshot() { throw new Error('Unexpected history source read'); } },
+      facilitiesClient: { async getRoomSnapshot() { throw new Error('Unexpected history source read'); } },
+    },
+  });
+  const historical = await httpRequest(historyApp).get(generated.headers.location).expect(200);
+  assert.deepEqual(historical.body, record);
+});
+
+test('persisted operation failures retain their public error and can be retrieved by the response run ID', async () => {
+  const example = contract.paths['/allocation/validate'].post.requestBody.content['application/json'].example;
+  const app = createApp({ runStore: contractRunStore() });
+  const failed = await httpRequest(app).post('/allocation/validate').send(example).expect(503);
+  assert.equal(failed.headers['x-allocation-persistence'], 'enabled');
+  const runId = failed.headers['x-allocation-run-id'];
+  assert.match(runId, new RegExp(contract.components.schemas.RunId.pattern));
+  assert.equal(failed.headers.location, undefined);
+  const lookup = await httpRequest(app).get(`/allocation/results/${runId}`).expect(200);
+  const record = lookup.body;
+  checkObjectFields(record, contract.components.schemas.RunRecord);
+  assert.equal(record.operation, 'validate');
+  assert.equal(record.status, 'error');
+  assert.equal(record.historical, true);
+  assert.equal(record.response, null);
+  assert.equal(record.candidateCount, 0);
+  assert.equal(record.validatedCount, 0);
+  checkObjectFields(record.error, contract.components.schemas.RunError);
+  assert.equal(record.error.status, 503);
+  assert.equal(record.error.code, failed.body.code);
+  assert.equal(record.error.message, failed.body.message);
+  assert.equal(record.error.traceId, failed.body.traceId);
+});
+
+test('storage failure is an explicit error rather than an unstored successful POST', async () => {
+  const fixture = loadFixture('direct-room');
+  const app = createApp({
+    runStore: {
+      async save() { throw new Error('Raw storage failure should stay private'); },
+      async findById() { return null; },
+    },
+  });
+  const failed = await httpRequest(app).post('/allocation/candidates').send(fixture.request).expect(503);
+  assert.equal(failed.body.code, 'RUN_STORAGE_UNAVAILABLE');
+  assert.ok(!failed.body.message.includes('Raw storage failure'));
+  assert.equal(failed.headers['x-allocation-persistence'], 'enabled');
+  assert.match(failed.headers['x-allocation-run-id'], new RegExp(contract.components.schemas.RunId.pattern));
+  assert.equal(failed.headers.location, undefined);
 });

@@ -12,12 +12,14 @@
     "dev": "node --watch src/server.js",
     "start": "node src/server.js",
     "test": "node --test",
+    "test:persistence": "node scripts/check-persistence.cjs",
     "preview:input": "node src/preview-input.js",
     "preview:rooms": "node src/preview-rooms.js"
   },
   "dependencies": {
     "dotenv": "^18.0.10",
     "express": "^5.3.0",
+    "mongodb": "^6.21.0",
     "zod": "^4.6.7"
   },
   "devDependencies": {

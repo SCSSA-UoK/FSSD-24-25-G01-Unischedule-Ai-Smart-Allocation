@@ -1,15 +1,25 @@
 openapi: 3.1.0
 info:
   title: Allocation service contract
-  version: 0.6.0
+  version: 0.7.0
   description: >-
     Draft for team review. Health, direct candidates, single-displacement room
     swaps and explained fixed scoring are implemented with fictional snapshots.
     A guarded validation adapter is implemented, but the proposed Platform peer
     endpoint and live input contract are absent. Default validation is unavailable;
     explicit fixture tests cannot create authoritative valid results. Authentication
-    on Allocation, live integration and storage remain unimplemented. Generation
-    and scoring stay pending. Allocation never writes bookings.
+    on Allocation and live integration remain unimplemented. Optional MongoDB
+    persistence stores allocation-owned final run records and embedded responses;
+    it is disabled by default. Existing POST bodies are unchanged. POST responses
+    report X-Allocation-Persistence; enabled storage supplies X-Allocation-Run-Id
+    for accepted parsed requests, including operation errors, and a Location on
+    success. Rejected input is not stored. Success follows acknowledged
+    storage; failures are explicit, with no automatic memory fallback. One final
+    document is inserted atomically: no running record or crash recovery is claimed,
+    and a crash before insertion may leave no record. ALLOCATION_PERSISTENCE=mongodb
+    opts in; MONGODB_URI is server-only and ALLOCATION_DB defaults to allocation_db,
+    restricted to names beginning allocation_. Generation and scoring stay pending.
+    Allocation never writes bookings or another service's database.
 servers:
   - url: http://localhost:4001
 paths:
@@ -64,6 +74,9 @@ paths:
             Dependency failure instead produces a 503 or 504 error.
           headers:
             X-Request-Id: { $ref: '#/components/headers/RequestId' }
+            X-Allocation-Persistence: { $ref: '#/components/headers/AllocationPersistence' }
+            X-Allocation-Run-Id: { $ref: '#/components/headers/AllocationRunId' }
+            Location: { $ref: '#/components/headers/ResultLocation' }
           content:
             application/json:
               schema: { $ref: '#/components/schemas/CandidateResponse' }
@@ -113,6 +126,9 @@ paths:
             or timed-out dependency reads instead return 503 or 504.
           headers:
             X-Request-Id: { $ref: '#/components/headers/RequestId' }
+            X-Allocation-Persistence: { $ref: '#/components/headers/AllocationPersistence' }
+            X-Allocation-Run-Id: { $ref: '#/components/headers/AllocationRunId' }
+            Location: { $ref: '#/components/headers/ResultLocation' }
           content:
             application/json:
               schema: { $ref: '#/components/schemas/SwapResponse' }
@@ -132,8 +148,8 @@ paths:
       description: >-
         Fixture-only scoring of up to 50 submitted direct or single-displacement
         plans against one scenario revision and facilities version. Requires JSON.
-        No candidate storage exists, so callers submit candidateId and moves,
-        rather than candidateIds for lookup. Sources, unchanged original times,
+        Scoring accepts explicit plans, not candidateIds for cross-run lookup.
+        Candidate IDs may recur in separately stored runs. Sources, unchanged original times,
         target membership, original blockers, content IDs and copied final room
         assignments are rechecked before scoring. A content hash is not an
         authentication signature. Invalid plans reject the whole batch with 422
@@ -169,6 +185,9 @@ paths:
             An empty batch returns an empty ranking after snapshot version checks.
           headers:
             X-Request-Id: { $ref: '#/components/headers/RequestId' }
+            X-Allocation-Persistence: { $ref: '#/components/headers/AllocationPersistence' }
+            X-Allocation-Run-Id: { $ref: '#/components/headers/AllocationRunId' }
+            Location: { $ref: '#/components/headers/ResultLocation' }
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ScoreResponse' }
@@ -231,6 +250,9 @@ paths:
             No candidate is authoritative valid; none enters validatedCandidates.
           headers:
             X-Request-Id: { $ref: '#/components/headers/RequestId' }
+            X-Allocation-Persistence: { $ref: '#/components/headers/AllocationPersistence' }
+            X-Allocation-Run-Id: { $ref: '#/components/headers/AllocationRunId' }
+            Location: { $ref: '#/components/headers/ResultLocation' }
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ValidateResponse' }
@@ -244,11 +266,55 @@ paths:
         '503': { $ref: '#/components/responses/ErrorResponse' }
         '504': { $ref: '#/components/responses/ErrorResponse' }
         '500': { $ref: '#/components/responses/ErrorResponse' }
+  /allocation/results/{runId}:
+    get:
+      operationId: getAllocationRun
+      x-implementation-status: implemented
+      description: >-
+        Read one allocation-owned historical final run. Persistence is disabled
+        by default (503 RUN_STORAGE_UNAVAILABLE); an enabled store with no matching
+        record returns 404 RUN_NOT_FOUND. Only lowercase run-prefixed UUIDv4 IDs are
+        accepted. The public record excludes MongoDB _id and configuration details.
+        It embeds the exact final response or a sanitized error, plus accepted input
+        and execution metadata. Reading history does not call upstream services,
+        refresh validation evidence or upgrade fixture proposals to authority.
+        Candidate identities can repeat across runs. MongoDB inserts one complete
+        record; a process crash before insertion is not recoverable through this API.
+      parameters:
+        - name: runId
+          in: path
+          required: true
+          schema: { $ref: '#/components/schemas/RunId' }
+          example: run-11111111-1111-4111-8111-111111111111
+      responses:
+        '200':
+          description: Historical run record; this is not fresh scheduling validation.
+          headers:
+            X-Request-Id: { $ref: '#/components/headers/RequestId' }
+            Cache-Control:
+              description: History is returned without cache reuse.
+              schema: { type: string, const: no-store }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RunRecord' }
+        '404': { $ref: '#/components/responses/ErrorResponse' }
+        '422': { $ref: '#/components/responses/ErrorResponse' }
+        '503': { $ref: '#/components/responses/ErrorResponse' }
+        '500': { $ref: '#/components/responses/ErrorResponse' }
 components:
   headers:
     RequestId:
       description: Generated per response; equals traceId in error bodies.
       schema: { type: string, format: uuid }
+    AllocationPersistence:
+      description: Present on allocation POST responses; enabled or explicitly disabled.
+      schema: { type: string, enum: [enabled, disabled] }
+    AllocationRunId:
+      description: Present for accepted parsed requests when persistence is enabled, including operation errors; storage may still fail.
+      schema: { $ref: '#/components/schemas/RunId' }
+    ResultLocation:
+      description: Present on a successful persisted POST; points to GET /allocation/results/{runId}.
+      schema: { type: string }
   responses:
     ErrorResponse:
       description: >-
@@ -256,11 +322,14 @@ components:
         scenario or facilities version; 413 body over 100kb; 415 unsupported body
         encoding or non-JSON request (UNSUPPORTED_MEDIA_TYPE); 422 invalid input,
         requirements or submitted candidate; 502 malformed or contradictory Platform
-        evidence; 503 failed dependency read or unavailable validation; 504 dependency/batch timeout;
+        evidence; 503 failed dependency read, unavailable validation or unavailable
+        run storage; 504 dependency/batch timeout;
         500 unexpected failure. Input preparation waits at most 5000ms by default,
         independently of the search-loop budget. Unexpected messages stay generic.
       headers:
         X-Request-Id: { $ref: '#/components/headers/RequestId' }
+        X-Allocation-Persistence: { $ref: '#/components/headers/AllocationPersistence' }
+        X-Allocation-Run-Id: { $ref: '#/components/headers/AllocationRunId' }
       content:
         application/json:
           schema: { $ref: '#/components/schemas/Error' }
@@ -269,6 +338,10 @@ components:
       type: string
       pattern: '^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$'
       description: Stable identifier, distinct from a display room code.
+    RunId:
+      type: string
+      pattern: '^run-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+      description: Lowercase UUIDv4 with a run- prefix; not a candidate ID.
     OffsetDateTime:
       type: string
       format: date-time
@@ -448,7 +521,7 @@ components:
       properties:
         runId:
           $ref: '#/components/schemas/Id'
-          description: Unique per response; does not imply a stored or retrievable run.
+          description: Unique per response; retrievable only when persistence is enabled and acknowledged.
         mode: { type: string, const: fixture }
         scope: { type: string, const: direct-only }
         validationStatus: { type: string, const: pending }
@@ -478,7 +551,7 @@ components:
       properties:
         runId:
           $ref: '#/components/schemas/Id'
-          description: Unique per response; does not imply stored or retrievable results.
+          description: Unique per response; retrievable only when persistence is enabled and acknowledged.
         mode: { type: string, const: fixture }
         scope: { type: string, const: single-displacement }
         validationStatus: { type: string, const: pending }
@@ -694,6 +767,70 @@ components:
         reasons: { type: array, items: { type: string } }
         validationSource: { type: string, const: fixture }
         validatedCandidates: { type: array, const: [], maxItems: 0 }
+    RunError:
+      type: object
+      additionalProperties: false
+      required: [status, code, message, traceId]
+      properties:
+        status: { type: integer, minimum: 400, maximum: 599 }
+        code: { type: string }
+        message: { type: string }
+        traceId: { type: string }
+    RunRecord:
+      type: object
+      additionalProperties: false
+      description: >-
+        One atomic final insert with embedded candidates/evidence, never a running
+        record. completed includes complete empty searches; truncated is a successful
+        bounded search; error has a sanitized failure and no response. Execution
+        timestamps may include fractional seconds. No raw credentials, headers,
+        environment values or MongoDB _id are exposed. historical is always true;
+        stored validation evidence is not revalidated by lookup.
+      required: [schemaVersion, runId, operation, status, historical, createdAt, completedAt, elapsedMs, scenarioId, scenarioRevision, facilitiesVersion, mode, scoringVersion, limits, request, candidateCount, validatedCount, response, error]
+      properties:
+        schemaVersion: { type: integer, const: 1 }
+        runId: { $ref: '#/components/schemas/RunId' }
+        operation: { type: string, enum: [direct, single-displacement, score, validate] }
+        status: { type: string, enum: [completed, truncated, error] }
+        historical: { type: boolean, const: true }
+        createdAt: { type: string, format: date-time }
+        completedAt: { type: string, format: date-time }
+        elapsedMs: { type: number, minimum: 0 }
+        scenarioId: { $ref: '#/components/schemas/Id' }
+        scenarioRevision: { type: integer, minimum: 0, maximum: 9007199254740991 }
+        facilitiesVersion:
+          anyOf:
+            - { $ref: '#/components/schemas/Id' }
+            - { type: 'null' }
+        mode:
+          anyOf:
+            - { type: string, const: fixture }
+            - { type: 'null' }
+        scoringVersion:
+          anyOf:
+            - { $ref: '#/components/schemas/Id' }
+            - { type: 'null' }
+        limits:
+          anyOf:
+            - { $ref: '#/components/schemas/CandidateRequest/properties/limits' }
+            - { type: 'null' }
+        request:
+          oneOf:
+            - { $ref: '#/components/schemas/CandidateRequest' }
+            - { $ref: '#/components/schemas/ScoreRequest' }
+        candidateCount: { type: integer, minimum: 0, maximum: 50 }
+        validatedCount: { type: integer, const: 0 }
+        response:
+          oneOf:
+            - { $ref: '#/components/schemas/CandidateResponse' }
+            - { $ref: '#/components/schemas/SwapResponse' }
+            - { $ref: '#/components/schemas/ScoreResponse' }
+            - { $ref: '#/components/schemas/ValidateResponse' }
+            - { type: 'null' }
+        error:
+          anyOf:
+            - { $ref: '#/components/schemas/RunError' }
+            - { type: 'null' }
     Error:
       type: object
       additionalProperties: false
